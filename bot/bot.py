@@ -69,13 +69,13 @@ async def creds_command(interaction: discord.Interaction):
             await interaction.response.send_message("No more credentials left.", ephemeral=True)
             return
 
-        msg = f"```\nusername: {account.username}\npassword: {account.password}\n```"
+        msg = f"```\nusername: {account.username}\npassword: {account.password}\n```\n-# Save the account! It will get deleted in 15 minutes."
 
         # Delete it after sending
         db.delete(account)
         db.commit()
 
-        await interaction.response.send_message(msg)
+        await interaction.response.send_message(msg, ephemeral=True)
 
         remaining = db.query(Account).count()
         print(f"[+] Sent account ID {account.id} ({remaining} remaining)")
