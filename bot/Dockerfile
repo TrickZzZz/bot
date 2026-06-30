@@ -9,8 +9,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy bot script
 COPY bot.py .
 
-# Create volume mount point for persistent database
-VOLUME ["/app/data"]
-
 # Run the bot
 CMD ["python", "bot.py"]
