@@ -2,7 +2,9 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 from datetime import datetime, timezone
+import json
 import os
+import time
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
@@ -12,9 +14,64 @@ load_dotenv()
 TOKEN = os.environ.get("TOKEN")
 VOICE_CHANNEL_ID = int(os.environ.get("VOICE_CHANNEL_ID", "1521166172182024475"))
 
+# ── Cooldown config ───────────────────────────────────────────────
+COOLDOWN_ROLES_PATH = os.path.join(os.path.dirname(__file__), "cooldown_roles.json")
+
+
+def load_cooldown_roles():
+    """Load the {role_id: cooldown_seconds} mapping from disk."""
+    try:
+        with open(COOLDOWN_ROLES_PATH, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        # Normalize keys to int so they can be matched against Discord role IDs.
+        return {int(role_id): int(seconds) for role_id, seconds in raw.items()}
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
+        print(f"[!] Could not load cooldown roles: {e}")
+        return {}
+
+
+COOLDOWN_ROLES = load_cooldown_roles()
+
+# Maps a Discord user ID to the UNIX timestamp (seconds) when their cooldown ends.
+active_cooldowns = {}
+
+
+def get_user_cooldown(member):
+    """Return the lowest cooldown (in seconds) among the roles a member has.
+
+    A lower cooldown means a more privileged role wins. Returns None if the
+    member has no configured cooldown role.
+    """
+    cooldowns = [
+        COOLDOWN_ROLES[role.id]
+        for role in getattr(member, "roles", [])
+        if role.id in COOLDOWN_ROLES
+    ]
+    return min(cooldowns) if cooldowns else None
+
+
+def get_remaining_cooldown(user_id):
+    """Return seconds left on a user's cooldown, or 0 if none is active.
+
+    Expired cooldowns are cleaned up so the user can run the command again.
+    """
+    ends_at = active_cooldowns.get(user_id)
+    if ends_at is None:
+        return 0
+    remaining = ends_at - time.time()
+    if remaining <= 0:
+        active_cooldowns.pop(user_id, None)
+        return 0
+    return remaining
+
 # ── Database setup ────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL")
-engine = create_engine(DATABASE_URL, echo=False)
+engine = create_engine(
+    DATABASE_URL,
+    echo=False,
+    pool_pre_ping=True,
+    pool_recycle=1800,
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -100,8 +157,34 @@ class CredBot(discord.Client):
 client = CredBot()
 
 
+def format_duration(seconds):
+    """Human-friendly duration, e.g. 90 -> '1m 30s'."""
+    seconds = int(round(seconds))
+    minutes, secs = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if secs or not parts:
+        parts.append(f"{secs}s")
+    return " ".join(parts)
+
+
 @client.tree.command(name="creds", description="Get and delete the next credential from the database")
 async def creds_command(interaction: discord.Interaction):
+    user_id = interaction.user.id
+
+    # Block the request if the user is still on cooldown.
+    remaining = get_remaining_cooldown(user_id)
+    if remaining > 0:
+        await interaction.response.send_message(
+            f"You're on cooldown. Try again in {format_duration(remaining)}.",
+            ephemeral=True,
+        )
+        return
+
     db = SessionLocal()
     try:
         # Fetch the oldest account (FIFO)
@@ -118,6 +201,12 @@ async def creds_command(interaction: discord.Interaction):
         db.commit()
 
         await interaction.response.send_message(msg, ephemeral=True)
+
+        # Apply the cooldown based on the user's lowest-cooldown role.
+        cooldown = get_user_cooldown(interaction.user)
+        if cooldown is not None:
+            active_cooldowns[user_id] = time.time() + cooldown
+            print(f"[+] Applied {cooldown}s cooldown to user {user_id}")
 
         remaining = db.query(Account).count()
         print(f"[+] Sent account ID {account.id} ({remaining} remaining)")

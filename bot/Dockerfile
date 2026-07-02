@@ -6,8 +6,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy bot script
+# Copy bot script and config
 COPY bot.py .
+COPY cooldown_roles.json .
 
 # Run the bot
 CMD ["python", "bot.py"]
