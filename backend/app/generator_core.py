@@ -808,28 +808,61 @@ TWOCAPTCHA_API_KEY = os.environ.get("TWOCAPTCHA_API_KEY", "").strip()
 ROBLOX_ARKOSE_PUBLIC_KEY = "476068BF-9607-4799-B53D-966BE98E2B81"
 ROBLOX_ARKOSE_SURL = "https://roblox-api.arkoselabs.com"
 
+def _parse_proxy_url(proxy_url: str) -> Optional[Dict[str, Any]]:
+    """Break http://user:pass@host:port into components for 2Captcha's
+    proxied task fields."""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(proxy_url)
+        if not p.hostname or not p.port:
+            return None
+        return {
+            "proxyType": "http",
+            "proxyAddress": p.hostname,
+            "proxyPort": p.port,
+            "proxyLogin": p.username or "",
+            "proxyPassword": p.password or "",
+        }
+    except Exception:
+        return None
+
 def _solve_arkose_captcha(
     ssl_ctx: ssl.SSLContext,
     site_key: str = ROBLOX_ARKOSE_PUBLIC_KEY,
     surl: str = ROBLOX_ARKOSE_SURL,
     page_url: str = "https://www.roblox.com/login",
     max_wait: float = 90.0,
+    use_proxy: bool = False,
 ) -> Tuple[bool, str]:
     """Solve a Roblox Arkose/FunCaptcha challenge via 2Captcha.
     Returns (success, token_or_error). Blocks for 15-60s typically —
-    call from a worker thread, never from a request handler directly."""
+    call from a worker thread, never from a request handler directly.
+
+    use_proxy=True makes 2Captcha's worker solve the puzzle THROUGH our own
+    residential proxy IP, instead of their own IP — keeping the challenge
+    request, the solve, and the final token submission all on one consistent
+    IP. Without this, the challenge is issued to our proxy IP but solved from
+    2Captcha's IP, then submitted back via our proxy IP again — a three-way
+    mismatch that some anti-bot systems (Arkose included) can flag."""
     if not TWOCAPTCHA_API_KEY:
         return False, "no-2captcha-key"
 
-    create_body = {
-        "clientKey": TWOCAPTCHA_API_KEY,
-        "task": {
-            "type": "FunCaptchaTaskProxyless",
-            "websiteURL": page_url,
-            "websitePublicKey": site_key,
-            "funcaptchaApiJSSubdomain": surl,
-        },
+    task: Dict[str, Any] = {
+        "websiteURL": page_url,
+        "websitePublicKey": site_key,
+        "funcaptchaApiJSSubdomain": surl,
     }
+    if use_proxy and PROXY_URL:
+        proxy_fields = _parse_proxy_url(PROXY_URL)
+        if proxy_fields:
+            task["type"] = "FunCaptchaTask"
+            task.update(proxy_fields)
+        else:
+            task["type"] = "FunCaptchaTaskProxyless"
+    else:
+        task["type"] = "FunCaptchaTaskProxyless"
+
+    create_body = {"clientKey": TWOCAPTCHA_API_KEY, "task": task}
     try:
         code, body, _ = _http(
             "POST", "https://api.2captcha.com/createTask",
@@ -952,7 +985,7 @@ def roblox_login(
     if not TWOCAPTCHA_API_KEY:
         return False, f"{reason} (captcha required, no 2captcha key configured)"
 
-    solved_ok, solved_token = _solve_arkose_captcha(ssl_ctx)
+    solved_ok, solved_token = _solve_arkose_captcha(ssl_ctx, use_proxy=use_proxy)
     if not solved_ok:
         return False, f"{reason} | captcha solve failed: {solved_token}"
 
