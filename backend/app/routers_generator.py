@@ -39,7 +39,11 @@ class _Session:
         self.stats: Optional[RunStats] = None
         # Start with DEFAULT_CONFIG so vault_api/vault_user/vault_pass are always present
         base = dict(DEFAULT_CONFIG)
-        base.update(load_config())
+        saved = load_config()
+        # Only update non-vault keys from saved config
+        for k, v in saved.items():
+            if k not in ("vault_api", "vault_user", "vault_pass"):
+                base[k] = v
         self.cfg: Dict[str, Any] = base
         self.usage: Dict[str, Any] = load_usage()
         self.key_states: Dict[int, Dict] = {}       # api_num -> {status, detail}
@@ -239,12 +243,51 @@ def get_config(_=Depends(get_current_user)):
 
 @router.get("/accounts")
 def get_accounts(search: str = "", account_type: str = "", _=Depends(get_current_user)):
-    accounts = filter_accounts(search=search, account_type=account_type or "")
-    # Mask passwords
-    return [
-        {**a, "pass": a["pass"][:2] + "***" + a["pass"][-2:] if len(a.get("pass","")) > 4 else "***"}
-        for a in accounts[:200]
-    ]
+    """Fetch accounts from vault (source of truth on Railway)."""
+    try:
+        ssl_ctx = make_ssl_context(bool(_session.cfg.get("ssl_verify", True)))
+        v = Vault(
+            str(_session.cfg["vault_api"]),
+            str(_session.cfg["vault_user"]),
+            _secure_load("vault_pass", _session.cfg),
+            ssl_ctx,
+        )
+        v.login()
+        code, body, _ = _http(
+            "GET", f"{v.base}/accounts",
+            headers=v._hdr(), ssl_ctx=ssl_ctx,
+        )
+        raw = []
+        if isinstance(body, list):
+            raw = body
+        elif isinstance(body, dict):
+            raw = body.get("accounts", [])
+        # Normalise to our format
+        accounts = []
+        for a in raw:
+            if not isinstance(a, dict): continue
+            user = a.get("username") or a.get("user") or ""
+            pw   = a.get("password") or a.get("pass") or ""
+            s = search.strip().lower()
+            t = (account_type or "").strip().lower()
+            if s and s not in user.lower() and s not in pw.lower(): continue
+            accounts.append({
+                "user": user,
+                "pass": pw[:2] + "***" + pw[-2:] if len(pw) > 4 else "***",
+                "date": a.get("date") or a.get("created_at") or "—",
+                "age": a.get("age") or "—",
+                "type": a.get("type") or "—",
+                "pw_changed": bool(a.get("pw_changed") or a.get("password_changed")),
+                "vault_pushed": True,
+            })
+        return accounts[:200]
+    except Exception as e:
+        # Fallback to local accounts
+        accounts = filter_accounts(search=search, account_type=account_type or "")
+        return [
+            {**a, "pass": a["pass"][:2] + "***" + a["pass"][-2:] if len(a.get("pass","")) > 4 else "***"}
+            for a in accounts[:200]
+        ]
 
 
 @router.get("/limits")
