@@ -93,6 +93,7 @@ class _Session:
         self.limits_data: Optional[Dict] = None
         self._session_id: str = ""
         self.started_by: str = ""  # username of whoever last called /start
+        self.current_account_type: str = ""  # the type actually running right now, if any
 
     def is_running(self) -> bool:
         return bool(self.thread and self.thread.is_alive())
@@ -113,34 +114,60 @@ class _Session:
         self.key_states[api_num] = {"status": status, "detail": detail}
 
     def queue_account(self, user, final_pw, old_pw, age, atype, pw_changed, vault_pushed, api_tail):
-        from .generator_core import append_account
+        from .generator_core import append_account, _flog
         try:
-            append_account(
+            entry = append_account(
                 user, final_pw, old_pw, age, atype, pw_changed, vault_pushed, api_tail,
                 session_id=self._session_id,
                 generated_by=self.started_by,
             )
-        except Exception:
-            pass  # never let a local-store hiccup interrupt the live worker
+            _flog(f"queue_account: append_account OK for {user}, generated_by={self.started_by!r}, entry_keys={list(entry.keys()) if entry else 'EMPTY'}")
+        except Exception as e:
+            _flog(f"queue_account: append_account FAILED for {user}: {e!r}")
 
     def queue_usage(self, key: str, count: int):
         pass  # usage handled by bump_key_usage() in generator_core
 
-    def build_run_cfg(self, overrides: Dict[str, Any]) -> Dict[str, Any]:
-        """Merge frontend-editable fields into the persisted session config.
-
-        CRITICAL: never replace self.cfg outright with a frontend payload —
-        the GeneratorConfig schema deliberately excludes vault_api/vault_user/
-        vault_pass (so the browser can't see or override them). A naive
-        `self.cfg = overrides` wipes those keys permanently once save_config()
-        clears and rewrites _MEM_CONFIG from the (now incomplete) dict.
-        """
-        merged = dict(self.cfg)
-        merged.update(overrides)
-        return merged
-
 
 _session = _Session()
+
+# ── Per-user preferences ────────────────────────────────────────────────────
+# _session.cfg holds SHARED infrastructure only: vault credentials, Bloxgen
+# keys, vault_enabled. These are admin-controlled and the same for everyone.
+# account_type/new_password/target_count/consecutive_empty_stop/ssl_verify
+# are personal run preferences — each logged-in user gets their own copy so
+# one person's settings never silently overwrite another's.
+PREF_FIELDS = ("account_type", "new_password", "target_count", "consecutive_empty_stop", "ssl_verify")
+_user_prefs: Dict[str, Dict[str, Any]] = {}
+_user_prefs_lock = threading.Lock()
+
+
+def _get_user_prefs(username: str) -> Dict[str, Any]:
+    key = str(username or "").strip().lower()
+    with _user_prefs_lock:
+        return dict(_user_prefs.get(key, {}))
+
+
+def _set_user_prefs(username: str, prefs: Dict[str, Any]) -> None:
+    key = str(username or "").strip().lower()
+    with _user_prefs_lock:
+        existing = _user_prefs.get(key, {})
+        existing.update(prefs)
+        _user_prefs[key] = existing
+
+
+def _build_user_cfg(username: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Combine shared infra config (vault creds, Bloxgen keys — admin owned)
+    with this specific user's own saved preferences, then apply any fresh
+    values from the current request on top. Nothing personal ever leaks
+    between different users' Config tabs."""
+    cfg = dict(_session.cfg)
+    cfg.update(_get_user_prefs(username))
+    if overrides:
+        for field in PREF_FIELDS:
+            if field in overrides:
+                cfg[field] = overrides[field]
+    return cfg
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -177,7 +204,7 @@ def get_status(user=Depends(get_current_user)):
         fails=s.fails if s else 0,
         vault_stock=_session.cfg.get("_vault_stock", -1) if is_admin(user) else -1,
         key_states=_session.key_states,
-        account_type=_session.cfg.get("account_type", "+30 days old"),
+        account_type=_session.current_account_type or "+30 days old",
     )
 
 
@@ -186,29 +213,38 @@ def start_session(config: GeneratorConfig, user=Depends(get_current_user)):
     if _session.is_running():
         raise HTTPException(400, "Session already running")
 
+    username = str(getattr(user, "username", "")).strip().lower()
     overrides = config.model_dump()
-    if not is_admin(user):
-        # Non-admins can never enable vault pushes or supply their own keys,
-        # no matter what the request body claims — server-side enforcement,
-        # not just a hidden UI checkbox.
-        overrides["vault_enabled"] = False
-        overrides.pop("bloxgen_keys", None)  # keep whatever admin already configured
 
-    # Merge — NEVER replace. Preserves vault_api/vault_user/vault_pass,
-    # which the GeneratorConfig schema deliberately omits.
-    cfg = _session.build_run_cfg(overrides)
+    # Save this user's own personal preferences for next time — never touches
+    # anyone else's saved settings, and never touches shared infra config.
+    _set_user_prefs(username, {k: overrides[k] for k in PREF_FIELDS if k in overrides})
+
+    if is_admin(user):
+        # Only an admin's bloxgen_keys/vault_enabled submission updates the
+        # SHARED infra config — those aren't personal preferences.
+        infra = {k: overrides[k] for k in ("bloxgen_keys", "vault_enabled") if k in overrides}
+        if infra:
+            _session.cfg.update(infra)
+            save_config(_session.cfg)
+
+    cfg = _build_user_cfg(username, overrides)
+    if not is_admin(user):
+        # Server-enforced regardless of what was submitted — not just a
+        # hidden UI checkbox.
+        cfg["vault_enabled"] = False
+        cfg["bloxgen_keys"] = list(_session.cfg.get("bloxgen_keys") or [])
     cfg["_dry_run"] = False
-    _session.cfg = cfg
-    save_config(cfg)
 
     _session._stop.clear()
     _session._pause.clear()
     _session.key_states = {}
     _session.log_q.clear()
+    _session.current_account_type = cfg.get("account_type", "+30 days old")
 
     import uuid as _uuid
     _session._session_id = _uuid.uuid4().hex[:12]
-    _session.started_by = str(getattr(user, "username", "")).strip().lower()
+    _session.started_by = username
     _session.usage = load_usage()
 
     worker = GeneratorWorker(
@@ -257,15 +293,19 @@ def pause_session(_=Depends(get_current_user)):
 
 
 @router.post("/dry-run")
-def dry_run(_=Depends(get_current_user)):
+def dry_run(user=Depends(get_current_user)):
     if _session.is_running():
         raise HTTPException(400, "Session already running")
 
-    cfg = dict(_session.cfg)
+    username = str(getattr(user, "username", "")).strip().lower()
+    cfg = _build_user_cfg(username)
+    if not is_admin(user):
+        cfg["vault_enabled"] = False
     cfg["_dry_run"] = True
     _session._stop.clear()
     _session.log_q.clear()
     _session.key_states = {}
+    _session.current_account_type = cfg.get("account_type", "+30 days old")
     import uuid as _uuid
     _session._session_id = _uuid.uuid4().hex[:12]
     _session.usage = load_usage()
@@ -301,20 +341,27 @@ def dry_run(_=Depends(get_current_user)):
 def update_config(config: GeneratorConfig, user=Depends(get_current_user)):
     if _session.is_running():
         raise HTTPException(400, "Cannot update config while running")
+
+    username = str(getattr(user, "username", "")).strip().lower()
     overrides = config.model_dump()
-    if not is_admin(user):
-        overrides["vault_enabled"] = False
-        overrides.pop("bloxgen_keys", None)  # non-admins can't see or set keys
-    # Merge only — same rule as /start. Vault credentials untouched.
-    merged = _session.build_run_cfg(overrides)
-    _session.cfg = merged
-    save_config(merged)
+
+    # Personal fields — saved per-user, never touches anyone else's settings.
+    _set_user_prefs(username, {k: overrides[k] for k in PREF_FIELDS if k in overrides})
+
+    # Shared infra fields — admin only, saved to the single shared config.
+    if is_admin(user):
+        infra = {k: overrides[k] for k in ("bloxgen_keys", "vault_enabled") if k in overrides}
+        if infra:
+            _session.cfg.update(infra)
+            save_config(_session.cfg)
+
     return {"saved": True}
 
 
 @router.get("/config")
 def get_config(user=Depends(get_current_user)):
-    cfg = dict(_session.cfg)
+    username = str(getattr(user, "username", "")).strip().lower()
+    cfg = _build_user_cfg(username)
     # Never send vault credentials to frontend
     for k in ("vault_pass", "vault_api", "vault_user", "_dry_run"):
         cfg.pop(k, None)
