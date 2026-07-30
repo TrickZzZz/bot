@@ -19,6 +19,7 @@ from .deps import get_current_user
 from .generator_core import (
     GeneratorWorker, RunStats, Vault, TYPE_META, ACCOUNT_TYPES,
     load_config, save_config, load_usage, save_usage,
+    DEFAULT_CONFIG,
     _get_keys, _secure_load, make_ssl_context,
     bloxgen_daily_limit, bloxgen_stock,
     filter_accounts, load_accounts,
@@ -36,7 +37,10 @@ class _Session:
         self._pause = threading.Event()
         self.log_q: deque = deque(maxlen=500)      # (message, level) tuples
         self.stats: Optional[RunStats] = None
-        self.cfg: Dict[str, Any] = load_config()
+        # Start with DEFAULT_CONFIG so vault_api/vault_user/vault_pass are always present
+        base = dict(DEFAULT_CONFIG)
+        base.update(load_config())
+        self.cfg: Dict[str, Any] = base
         self.usage: Dict[str, Any] = load_usage()
         self.key_states: Dict[int, Dict] = {}       # api_num -> {status, detail}
         self.stock_data: Dict[str, Any] = {}
