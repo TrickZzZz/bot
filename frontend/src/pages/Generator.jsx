@@ -175,8 +175,11 @@ export default function Generator() {
   }, [logs])
 
   React.useEffect(function() {
-    if (tab === "accounts") loadAccounts()
-  }, [tab, search])
+    if (tab === "accounts") {
+      if (!isAdmin) { setTab("feed"); return }
+      loadAccounts()
+    }
+  }, [tab, search, isAdmin])
 
   function startStream() {
     if (esRef.current) esRef.current.close()
@@ -265,13 +268,14 @@ export default function Generator() {
   var keyStates = status ? (status.key_states || {}) : {}
   var keyCount = cfg && cfg.bloxgen_keys && cfg.bloxgen_keys.length ? cfg.bloxgen_keys.length : 7
   var hasHidden = getHiddenSet().size > 0
+  var isAdmin = !!(cfg && cfg.is_admin)
 
   var tabs = [
     {id:"feed", label:"Live Feed", icon: Circle},
-    {id:"accounts", label:"Accounts", icon: Users},
+    isAdmin ? {id:"accounts", label:"Accounts", icon: Users} : null,
     {id:"limits", label:"Limits", icon: BarChart3},
     {id:"config", label:"Config", icon: Settings2},
-  ]
+  ].filter(Boolean)
 
   // key chips: use live key_states if we have them, otherwise show placeholders sized to configured key count
   var keyChips = Object.keys(keyStates).length > 0
@@ -525,10 +529,12 @@ export default function Generator() {
               React.createElement(SectionLabel, {icon: ShieldCheck}, "Vault & safety"),
               React.createElement("div", {className:"space-y-4"},
                 React.createElement("div", {className:"flex gap-5"},
-                  React.createElement("label", {className:"flex items-center gap-2 text-sm cursor-pointer"},
-                    React.createElement("input", {type:"checkbox", checked:cfg.vault_enabled||false, onChange:function(e){upd("vault_enabled",e.target.checked)}}),
-                    "Push to vault"
-                  ),
+                  isAdmin
+                    ? React.createElement("label", {className:"flex items-center gap-2 text-sm cursor-pointer"},
+                        React.createElement("input", {type:"checkbox", checked:cfg.vault_enabled||false, onChange:function(e){upd("vault_enabled",e.target.checked)}}),
+                        "Push to vault"
+                      )
+                    : React.createElement("span", {className:"text-xs text-muted-foreground italic"}, "Vault access is managed by the site owner"),
                   React.createElement("label", {className:"flex items-center gap-2 text-sm cursor-pointer"},
                     React.createElement("input", {type:"checkbox", checked:cfg.ssl_verify||false, onChange:function(e){upd("ssl_verify",e.target.checked)}}),
                     "Verify SSL"
@@ -541,8 +547,8 @@ export default function Generator() {
                 )
               ),
 
-              React.createElement(SectionLabel, {icon: KeyRound}, "API keys"),
-              React.createElement("div", {className:"space-y-1.5"},
+              isAdmin && React.createElement(SectionLabel, {icon: KeyRound}, "API keys"),
+              isAdmin && React.createElement("div", {className:"space-y-1.5"},
                 React.createElement("label", {className:"text-sm font-medium"}, "Bloxgen API keys"),
                 React.createElement("p", {className:"text-xs text-muted-foreground -mt-0.5 mb-1.5"}, "One per line"),
                 React.createElement("textarea", {
