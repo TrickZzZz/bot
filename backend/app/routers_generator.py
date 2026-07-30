@@ -14,8 +14,11 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 from .deps import get_current_user
+from .database import get_db
+from . import models
 from .generator_core import (
     GeneratorWorker, RunStats, Vault, TYPE_META, ACCOUNT_TYPES,
     load_config, save_config, load_usage, save_usage,
@@ -46,6 +49,28 @@ def require_admin(user=Depends(get_current_user)):
     if not _is_admin(user):
         raise HTTPException(403, "Admin access required")
     return user
+
+
+@router.get("/admin/users")
+def list_users(_=Depends(require_admin), db: Session = Depends(get_db)):
+    """List every registered user — admin only. Shows username and whether
+    they're currently on the ADMIN_USERNAMES allowlist."""
+    rows = db.query(models.User).all()
+    out = []
+    for u in rows:
+        uname = str(getattr(u, "username", ""))
+        entry = {
+            "username": uname,
+            "is_admin": (not _ADMIN_USERNAMES) or (uname.strip().lower() in _ADMIN_USERNAMES),
+        }
+        # Include created_at if the model happens to have it — optional field,
+        # don't fail the whole request if it doesn't exist.
+        created = getattr(u, "created_at", None)
+        if created is not None:
+            entry["created_at"] = str(created)
+        out.append(entry)
+    out.sort(key=lambda e: e["username"].lower())
+    return out
 
 
 def _format_vault_date(raw) -> str:
