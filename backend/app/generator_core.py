@@ -579,18 +579,42 @@ class Vault:
                     return int(body[k])
         return -1
 
-    def add_account(self, username: str, password: str, idempotent: bool = True) -> bool:
+    def add_account(
+        self,
+        username: str,
+        password: str,
+        idempotent: bool = True,
+        age: str = "",
+        account_type: str = "",
+        pw_changed: bool = False,
+    ) -> bool:
         """Push account to vault. Returns True if pushed, False if skipped (duplicate).
 
         idempotent=True relies on the vault returning HTTP 409 on duplicate — avoids
         the full GET /accounts round-trip that _has_account() required.
+
+        age/account_type/pw_changed are sent speculatively — we don't know for
+        certain the vault's schema stores these fields, but we DO have this data
+        in hand at generation time and it costs nothing to send. If the vault
+        stores and returns them, the Accounts table's Age/Type/PW? columns will
+        populate correctly going forward. Accounts already in the vault from
+        before this change won't retroactively gain this data — there's no way
+        to recover it after the fact.
         """
         if not self.token:
             self.login()
+        payload: Dict[str, Any] = {"username": username, "password": password}
+        if age:
+            payload["age"] = age
+        if account_type:
+            payload["type"] = account_type
+            payload["account_type"] = account_type  # send both common field-name variants
+        payload["pw_changed"] = pw_changed
+        payload["password_changed"] = pw_changed
         code, body, _ = _http(
             "POST", f"{self.base}/accounts",
             headers=self._hdr(),
-            body={"username": username, "password": password},
+            body=payload,
             ssl_ctx=self.ssl_ctx,
         )
         if code == 401:
@@ -598,7 +622,7 @@ class Vault:
             code, body, _ = _http(
                 "POST", f"{self.base}/accounts",
                 headers=self._hdr(),
-                body={"username": username, "password": password},
+                body=payload,
                 ssl_ctx=self.ssl_ctx,
             )
         if code == 409:
@@ -618,10 +642,11 @@ class Vault:
         """
         if not self.token or not self._token_fresh():
             self.login()
+        body = {"password": new_password, "pw_changed": True, "password_changed": True}
         attempts = [
-            ("PATCH", f"{self.base}/accounts/{username}", {"password": new_password}),
-            ("PUT",   f"{self.base}/accounts/{username}", {"password": new_password}),
-            ("POST",  f"{self.base}/accounts/{username}/password", {"password": new_password}),
+            ("PATCH", f"{self.base}/accounts/{username}", body),
+            ("PUT",   f"{self.base}/accounts/{username}", body),
+            ("POST",  f"{self.base}/accounts/{username}/password", body),
         ]
         last_err = ""
         for method, url, body in attempts:
@@ -1397,7 +1422,10 @@ class GeneratorWorker:
             if vault and not already_local:
                 logger.debug(f"vault.add_account for {user}")
                 try:
-                    pushed = vault.add_account(user, final_pw, idempotent=False)  # dup already checked locally
+                    pushed = vault.add_account(
+                        user, final_pw, idempotent=False,  # dup already checked locally
+                        age=normalize_age(age_label), account_type=account_type, pw_changed=pw_changed,
+                    )
                     logger.debug(f"vault.add_account pushed={pushed}")
                     vault_pushed = pushed
                     if pushed:
