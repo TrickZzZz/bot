@@ -1,9 +1,17 @@
 from __future__ import annotations
 """generator_core.py — DeltaCore engine for Railway. No UI deps."""
 import os
+import sys
 import logging
 
 logger = logging.getLogger("generator_core")
+logger.setLevel(logging.DEBUG)
+if not logger.handlers:
+    _h = logging.StreamHandler(sys.stdout)
+    _h.setLevel(logging.DEBUG)
+    _h.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
+    logger.addHandler(_h)
+    logger.propagate = False  # don't also dump through uvicorn's root handler
 
 def _flog(msg: str) -> None:
     logger.debug(str(msg))
@@ -1006,6 +1014,13 @@ def roblox_login(
     )
     if not needs_captcha:
         return False, reason
+
+    # Dump the FULL raw challenge response — Arkose challenges sometimes carry
+    # a session-specific "blob"/token alongside the generic site key, and a
+    # generic solve (no blob) can fail even when everything else is correct.
+    # This line only goes to Railway's log output (stdout), never to the
+    # user-facing feed, since it may contain internal Roblox response fields.
+    logger.debug(f"roblox captcha challenge full body for {username}: {err_body}")
 
     if not TWOCAPTCHA_API_KEY:
         return False, f"{reason} (captcha required, no 2captcha key configured)"
