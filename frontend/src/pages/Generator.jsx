@@ -217,6 +217,20 @@ export default function Generator() {
     }).catch(function(e) { alert(e.message); setSaving(false) })
   }
 
+  function handleChangeUnchangedPasswords() {
+    if (!cfg || !cfg.new_password || cfg.new_password.length < 8) {
+      alert("Set a new password (8+ characters) in Config first.")
+      return
+    }
+    if (!confirm(
+      "Attempt a fresh Roblox login + password change for every vault account that hasn't been changed yet.\n\n" +
+      "Some accounts will be skipped — Roblox challenges programmatic logins from this server, so not every login will succeed. That's expected.\n\n" +
+      "Progress shows in Live Feed. Continue?"
+    )) return
+    setLogs([]); setElapsed(0); setTab("feed")
+    gapi("/accounts/change-passwords", "POST").then(startStream).catch(function(e) { alert(e.message) })
+  }
+
   function loadAccounts() {
     gapi("/accounts?search=" + encodeURIComponent(search)).then(function(list) {
       var hidden = getHiddenSet()
@@ -380,6 +394,9 @@ export default function Generator() {
           ),
           hasHidden && React.createElement(Button, {size:"sm", variant:"ghost", onClick:showAllAccounts, className:"gap-1.5"},
             React.createElement(RotateCcw, {className:"h-3.5 w-3.5"}), "Show all"
+          ),
+          React.createElement(Button, {size:"sm", variant:"outline", disabled:running, onClick:handleChangeUnchangedPasswords, className:"gap-1.5"},
+            React.createElement(ShieldCheck, {className:"h-3.5 w-3.5"}), "Change unchanged passwords"
           ),
           React.createElement("div", {className:"flex items-center gap-1.5 text-xs text-muted-foreground whitespace-nowrap ml-auto"},
             hasHidden && React.createElement("span", {className:"px-1.5 py-0.5 rounded bg-secondary text-[10px] font-medium"}, "filtered"),
