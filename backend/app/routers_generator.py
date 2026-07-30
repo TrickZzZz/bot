@@ -403,7 +403,7 @@ def change_unchanged_passwords(_=Depends(get_current_user)):
                     _bump("already-target-password")
                     continue
                 try:
-                    login_ok, login_result = roblox_login(user, old_pw, ssl_ctx)
+                    login_ok, login_result = roblox_login(user, old_pw, ssl_ctx, use_proxy=True)
                 except Exception as e:
                     login_ok, login_result = False, str(e)
                 if not login_ok:
@@ -416,7 +416,7 @@ def change_unchanged_passwords(_=Depends(get_current_user)):
                         _bump("login-other")
                     time.sleep(0.5)
                     continue
-                ok, reason = provider_change_password(login_result, old_pw, new_password, ssl_ctx)
+                ok, reason = provider_change_password(login_result, old_pw, new_password, ssl_ctx, use_proxy=True)
                 if not ok:
                     _session.queue_log(f"Skip {user}: PW change failed ({reason})", "warn")
                     _bump("pw-change-failed")

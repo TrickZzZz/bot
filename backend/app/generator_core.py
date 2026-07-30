@@ -804,6 +804,7 @@ def roblox_login(
     password: str,
     ssl_ctx: ssl.SSLContext,
     timeout: float = 20.0,
+    use_proxy: bool = False,
 ) -> Tuple[bool, str]:
     """Log in to Roblox and return (success, .ROBLOSECURITY cookie or error reason)."""
     login_url = "https://auth.roblox.com/v2/login"
@@ -812,7 +813,7 @@ def roblox_login(
     try:
         _, __, hdrs = _http("POST", login_url,
                             headers={"Content-Type": "application/json"},
-                            body={}, ssl_ctx=ssl_ctx, timeout=timeout, use_proxy=True)
+                            body={}, ssl_ctx=ssl_ctx, timeout=timeout, use_proxy=use_proxy)
         csrf = hdrs.get("x-csrf-token", "")
     except Exception as e:
         return False, f"csrf-fetch: {e}"
@@ -836,7 +837,7 @@ def roblox_login(
             },
             method="POST",
         )
-        opener = _get_proxy_opener() if PROXY_URL else None
+        opener = _get_proxy_opener() if (use_proxy and PROXY_URL) else None
         opened = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
         with opened as resp:
             # getheaders() returns ALL headers including multiple Set-Cookie entries
@@ -867,12 +868,20 @@ def provider_change_password(
     new_password: str,
     ssl_ctx: ssl.SSLContext,
     timeout: float = 30.0,
+    use_proxy: bool = False,
 ) -> Tuple[bool, str]:
     """Change Roblox account password via .ROBLOSECURITY cookie.
 
     Returns (success, reason).  reason is empty on success, else a
     short diagnostic string (e.g. "csrf-fetch", "bad-password",
     "http-400", "timeout").
+
+    use_proxy should only be True when the cookie itself was obtained
+    through the same proxy (e.g. via roblox_login(use_proxy=True)) —
+    mixing a Bloxgen-issued cookie with a different exit IP than whatever
+    context it was created under reads as session hijacking to Roblox
+    and gets rejected (csrf-rejected / 9002), even though the cookie
+    itself would have worked fine over a consistent connection.
     """
     # Roblox rejects same-password changes with a specific error
     if current_password == new_password:
@@ -894,7 +903,7 @@ def provider_change_password(
             hdrs["X-CSRF-TOKEN"] = csrf
         req = urllib.request.Request(url, data=body_json, headers=hdrs, method="POST")
         try:
-            opener = _get_proxy_opener() if PROXY_URL else None
+            opener = _get_proxy_opener() if (use_proxy and PROXY_URL) else None
             opened = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
             with opened as resp:
                 return (True, "" if resp.status in (200, 204) else f"http-{resp.status}", None)
