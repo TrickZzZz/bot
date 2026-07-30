@@ -66,7 +66,9 @@ export default function Generator() {
   var esRef = React.useRef(null)
 
   React.useEffect(function() {
-    gapi("/config").then(setCfg).catch(function(){})
+    gapi("/config").then(setCfg).catch(function() {
+      setCfg({account_type:"+30 days old",new_password:"",target_count:0,vault_enabled:true,ssl_verify:true,bloxgen_keys:[],consecutive_empty_stop:5})
+    })
     function poll() { gapi("/status").then(setStatus).catch(function(){}) }
     poll()
     var t = setInterval(poll, 2000)
@@ -108,10 +110,6 @@ export default function Generator() {
   function handleStats() {
     setLogs([])
     gapi("/dry-run", "POST").then(startStream).catch(function(e) { alert(e.message) })
-  }
-
-  function handleDbCheck() {
-    gapi("/limits").then(function(d) { setLimits(d); setTab("limits") }).catch(function(e) { alert(e.message) })
   }
 
   function handleSave() {
@@ -211,7 +209,7 @@ export default function Generator() {
 
   var limitsContent = tab === "limits" && React.createElement("div", {style:{flex:1,overflowY:"auto",padding:14}},
     !limits
-      ? React.createElement("div", {style:{color:"#484f58",fontSize:12}}, "Press DB Check to load...")
+      ? React.createElement("div", {style:{color:"#484f58",fontSize:12}}, "No limits data yet — press Stats to load...")
       : React.createElement("table", {style:{width:"100%",borderCollapse:"collapse",fontSize:12}},
           React.createElement("thead", null,
             React.createElement("tr", null,
@@ -300,7 +298,6 @@ export default function Generator() {
       React.createElement(Btn, {color:"#238636", disabled:running, onClick:handleStart}, "Start"),
       React.createElement(Btn, {color:"#da3633", disabled:!running, onClick:handleStop}, "Stop"),
       React.createElement(Btn, {color:"#1f6feb", disabled:running, onClick:handleStats}, "Stats"),
-      React.createElement(Btn, {color:"#6e40c9", disabled:running, onClick:handleDbCheck}, "DB Check"),
       React.createElement("div", {style:{marginLeft:"auto",display:"flex",gap:4}},
         React.createElement(TabBtn, {active:tab==="feed", label:"Feed", onClick:function(){setTab("feed")}}),
         React.createElement(TabBtn, {active:tab==="accounts", label:"Accounts", onClick:function(){setTab("accounts")}}),
