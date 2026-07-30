@@ -42,7 +42,12 @@ export default function Generator() {
       setCfg({account_type:"+30 days old",new_password:"",target_count:0,vault_enabled:true,ssl_verify:true,bloxgen_keys:[],consecutive_empty_stop:5})
     })
     function poll() { gapi("/status").then(setStatus).catch(function(){}) }
-    function pollLimits() { gapi("/limits").then(setLimits).catch(function(){}) }
+    function pollLimits() { 
+      gapi("/limits").then(function(d) {
+        console.log("limits response:", JSON.stringify(d).slice(0,300))
+        setLimits(d)
+      }).catch(function(){}) 
+    }
     poll(); pollLimits()
     var t = setInterval(poll, 2000)
     var tl = setInterval(pollLimits, 120000)
@@ -247,7 +252,7 @@ export default function Generator() {
                     : has
                       ? React.createElement("span", {className:"text-green-400"}, "in stock")
                       : React.createElement("span", {className:"text-red-400"}, "no stock")
-                  var typeName = t || "unknown"
+                  var typeName = t ? String(t) : "—"
                   var stockCount = s && (s.count || s.quantity || s.stock) ? (s.count || s.quantity || s.stock) : "—"
                   return React.createElement("tr", {key:typeName, className:"border-b border-border/60 last:border-0"},
                     React.createElement("td", {className:"px-3 py-2 font-medium"}, typeName),
