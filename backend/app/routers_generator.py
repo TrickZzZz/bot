@@ -1,0 +1,316 @@
+"""
+routers_generator.py
+Add to backend/app/ and register in main.py:
+    from . import routers_generator
+    app.include_router(routers_generator.router)
+"""
+import asyncio
+import json
+import threading
+import time
+from collections import deque
+from typing import Any, Dict, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from .deps import get_current_user
+from .generator_core import (
+    GeneratorWorker, RunStats, Vault, TYPE_META, ACCOUNT_TYPES,
+    load_config, save_config, load_usage, save_usage,
+    _get_keys, _secure_load, make_ssl_context,
+    bloxgen_daily_limit, bloxgen_stock,
+    filter_accounts, load_accounts,
+)
+
+router = APIRouter(prefix="/generator", tags=["generator"])
+
+# ── Session state (single shared session, same as desktop) ────────────────────
+
+class _Session:
+    def __init__(self):
+        self.worker: Optional[GeneratorWorker] = None
+        self.thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._pause = threading.Event()
+        self.log_q: deque = deque(maxlen=500)      # (message, level) tuples
+        self.stats: Optional[RunStats] = None
+        self.cfg: Dict[str, Any] = load_config()
+        self.usage: Dict[str, Any] = load_usage()
+        self.key_states: Dict[int, Dict] = {}       # api_num -> {status, detail}
+        self.stock_data: Dict[str, Any] = {}
+        self.limits_data: Optional[Dict] = None
+        self._session_id: str = ""
+
+    def is_running(self) -> bool:
+        return bool(self.thread and self.thread.is_alive())
+
+    def queue_log(self, msg: str, level: str = "info", replace=None):
+        self.log_q.append({"msg": str(msg), "level": level})
+
+    def queue_stats(self, stats: RunStats, payload: str):
+        self.stats = stats
+        if payload.startswith("stock:"):
+            try:
+                n = int(payload.split(":")[1])
+                self.cfg["_vault_stock"] = n
+            except Exception:
+                pass
+
+    def queue_key(self, api_num: int, status: str, detail: str):
+        self.key_states[api_num] = {"status": status, "detail": detail}
+
+    def queue_account(self, *args):
+        pass  # accounts saved to disk by append_account() in generator_core
+
+    def queue_usage(self, key: str, count: int):
+        pass  # usage handled by bump_key_usage() in generator_core
+
+
+_session = _Session()
+
+# ── Schemas ───────────────────────────────────────────────────────────────────
+
+class GeneratorConfig(BaseModel):
+    account_type: str = "+30 days old"
+    new_password: str = ""
+    target_count: int = 0
+    vault_enabled: bool = True
+    ssl_verify: bool = True
+    bloxgen_keys: list = []
+    consecutive_empty_stop: int = 5
+    discord_webhook: str = ""
+
+class StatusResponse(BaseModel):
+    running: bool
+    session_id: str
+    done: int
+    stock_empty: int
+    fails: int
+    vault_stock: int
+    key_states: Dict[int, Dict]
+    account_type: str
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@router.get("/status", response_model=StatusResponse)
+def get_status(_=Depends(get_current_user)):
+    s = _session.stats
+    return StatusResponse(
+        running=_session.is_running(),
+        session_id=_session._session_id,
+        done=s.done if s else 0,
+        stock_empty=s.stock_empty if s else 0,
+        fails=s.fails if s else 0,
+        vault_stock=_session.cfg.get("_vault_stock", -1),
+        key_states=_session.key_states,
+        account_type=_session.cfg.get("account_type", "+30 days old"),
+    )
+
+
+@router.post("/start")
+def start_session(config: GeneratorConfig, _=Depends(get_current_user)):
+    if _session.is_running():
+        raise HTTPException(400, "Session already running")
+
+    cfg = config.model_dump()
+    cfg["_dry_run"] = False
+    _session.cfg = cfg
+    save_config(cfg)
+
+    _session._stop.clear()
+    _session._pause.clear()
+    _session.key_states = {}
+    _session.log_q.clear()
+
+    import uuid as _uuid
+    _session._session_id = _uuid.uuid4().hex[:12]
+    _session.usage = load_usage()
+
+    worker = GeneratorWorker(
+        cfg_snapshot=cfg,
+        usage=_session.usage,
+        log=_session.queue_log,
+        stats_cb=_session.queue_stats,
+        key_cb=_session.queue_key,
+        account_cb=_session.queue_account,
+        usage_cb=_session.queue_usage,
+        should_stop=_session._stop.is_set,
+        is_paused=_session._pause.is_set,
+        session_id=_session._session_id,
+    )
+    _session.worker = worker
+
+    def run():
+        try:
+            _session.stats = worker.run()
+            _session.queue_log("Session complete", "ok")
+        except Exception as e:
+            _session.queue_log(f"Worker error: {e}", "error")
+        finally:
+            _session.queue_log("__done__", "__done__")
+
+    _session.thread = threading.Thread(target=run, daemon=True)
+    _session.thread.start()
+    return {"started": True, "session_id": _session._session_id}
+
+
+@router.post("/stop")
+def stop_session(_=Depends(get_current_user)):
+    if not _session.is_running():
+        raise HTTPException(400, "No session running")
+    _session._stop.set()
+    return {"stopped": True}
+
+
+@router.post("/pause")
+def pause_session(_=Depends(get_current_user)):
+    if _session._pause.is_set():
+        _session._pause.clear()
+        return {"paused": False}
+    _session._pause.set()
+    return {"paused": True}
+
+
+@router.post("/dry-run")
+def dry_run(_=Depends(get_current_user)):
+    if _session.is_running():
+        raise HTTPException(400, "Session already running")
+
+    cfg = dict(_session.cfg)
+    cfg["_dry_run"] = True
+    _session._stop.clear()
+    _session.log_q.clear()
+    _session.key_states = {}
+    import uuid as _uuid
+    _session._session_id = _uuid.uuid4().hex[:12]
+    _session.usage = load_usage()
+
+    worker = GeneratorWorker(
+        cfg_snapshot=cfg,
+        usage=_session.usage,
+        log=_session.queue_log,
+        stats_cb=_session.queue_stats,
+        key_cb=_session.queue_key,
+        account_cb=_session.queue_account,
+        usage_cb=_session.queue_usage,
+        should_stop=_session._stop.is_set,
+        is_paused=_session._pause.is_set,
+        session_id=_session._session_id,
+    )
+    _session.worker = worker
+
+    def run():
+        try:
+            worker.run()
+        except Exception as e:
+            _session.queue_log(f"Dry run error: {e}", "error")
+        finally:
+            _session.queue_log("__done__", "__done__")
+
+    _session.thread = threading.Thread(target=run, daemon=True)
+    _session.thread.start()
+    return {"started": True, "dry_run": True}
+
+
+@router.post("/config")
+def update_config(config: GeneratorConfig, _=Depends(get_current_user)):
+    if _session.is_running():
+        raise HTTPException(400, "Cannot update config while running")
+    # Merge — preserve vault credentials already in cfg (from DEFAULT_CONFIG)
+    _session.cfg.update(config.model_dump())
+    save_config(_session.cfg)
+    return {"saved": True}
+
+
+@router.get("/config")
+def get_config(_=Depends(get_current_user)):
+    cfg = dict(_session.cfg)
+    # Never send vault credentials to frontend
+    for k in ("vault_pass", "vault_api", "vault_user", "_dry_run"):
+        cfg.pop(k, None)
+    return cfg
+
+
+@router.get("/accounts")
+def get_accounts(search: str = "", account_type: str = "", _=Depends(get_current_user)):
+    accounts = filter_accounts(search=search, account_type=account_type or "")
+    # Mask passwords
+    return [
+        {**a, "pass": a["pass"][:2] + "***" + a["pass"][-2:] if len(a.get("pass","")) > 4 else "***"}
+        for a in accounts[:200]
+    ]
+
+
+@router.get("/limits")
+def get_limits(_=Depends(get_current_user)):
+    """Fetch fresh limits from Bloxgen for all keys."""
+    keys = _get_keys(_session.cfg.get("bloxgen_keys") or [])
+    if not keys:
+        raise HTTPException(400, "No API keys configured")
+    ssl_ctx = make_ssl_context(bool(_session.cfg.get("ssl_verify", True)))
+    results = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    def _lim(k):
+        return bloxgen_daily_limit(k, ssl_ctx)
+    with ThreadPoolExecutor(max_workers=min(len(keys), 6)) as pool:
+        futs = {pool.submit(_lim, k): k for k in keys}
+        for fut in as_completed(futs):
+            try:
+                results.append(fut.result())
+            except Exception:
+                pass
+    stock = {}
+    for k in keys:
+        try:
+            raw = bloxgen_stock(k, ssl_ctx)
+            stock = {t: v for t, v in raw.items() if t in TYPE_META}
+            break
+        except Exception:
+            pass
+    return {"limits": results, "stock": stock, "types": ACCOUNT_TYPES}
+
+
+@router.get("/stream")
+async def stream_logs(token: str = ""):
+    """Server-Sent Events — streams live feed to browser.
+    Uses ?token= query param because EventSource cannot set Authorization headers.
+    """
+    # Validate JWT manually (same logic as get_current_user in deps.py)
+    from jose import jwt, JWTError
+    import os
+    try:
+        secret = os.environ.get("JWT_SECRET_KEY", "")
+        algo   = os.environ.get("JWT_ALGORITHM", "HS256")
+        if not secret or not token:
+            raise ValueError("missing token or secret")
+        jwt.decode(token, secret, algorithms=[algo])
+    except Exception:
+        from fastapi.responses import Response
+        return Response(status_code=401)
+    async def event_generator():
+        last_len = 0
+        heartbeat = 0
+        while True:
+            current = list(_session.log_q)
+            new_items = current[last_len:]
+            for item in new_items:
+                if item["level"] == "__done__":
+                    yield f"data: {json.dumps({'done': True})}\n\n"
+                    return
+                yield f"data: {json.dumps(item)}\n\n"
+            last_len = len(current)
+            heartbeat += 1
+            if heartbeat % 25 == 0:  # heartbeat every ~2.5s
+                yield f"data: {json.dumps({'heartbeat': True})}\n\n"
+            await asyncio.sleep(0.1)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
