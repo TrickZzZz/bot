@@ -96,7 +96,7 @@ export default function Generator() {
   const startStream = React.useCallback(() => {
     esRef.current?.close()
     const token = localStorage.getItem("access_token")
-    const es = new EventSource(`${BASE()}/generator/stream?token=${encodeURIComponent(token ?? "")}`)
+    const es = new EventSource(`${BASE()}/generator/stream?token=${encodeURIComponent(token || "")}`)
     esRef.current = es
     es.onmessage = (e) => {
       const d = JSON.parse(e.data)
@@ -148,23 +148,23 @@ export default function Generator() {
     setCfgDirty(true)
   }
 
-  const running = status?.running ?? false
+  const running = status?.running || false
 
   return (
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <label style={{ ...S.label, margin: 0, display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-                      <input type="checkbox" checked={cfg.vault_enabled ?? true} onChange={(e) => updateCfg("vault_enabled", e.target.checked)} />
+                      <input type="checkbox" checked={cfg.vault_enabled || true} onChange={(e) => updateCfg("vault_enabled", e.target.checked)} />
                       Push to vault
                     </label>
                     <label style={{ ...S.label, margin: 0, display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-                      <input type="checkbox" checked={cfg.ssl_verify ?? true} onChange={(e) => updateCfg("ssl_verify", e.target.checked)} />
+                      <input type="checkbox" checked={cfg.ssl_verify || true} onChange={(e) => updateCfg("ssl_verify", e.target.checked)} />
                       Verify SSL
                     </label>
                   </div>
 
                   <div>
                     <label style={S.label}>Stop after N consecutive empty (0 = never)</label>
-                    <input value={String(cfg.consecutive_empty_stop ?? 5)} onChange={(e) => updateCfg("consecutive_empty_stop", parseInt(e.target.value) || 0)} style={{ ...S.input, width: 80 }} />
+                    <input value={String(cfg.consecutive_empty_stop || 5)} onChange={(e) => updateCfg("consecutive_empty_stop", parseInt(e.target.value) || 0)} style={{ ...S.input, width: 80 }} />
                   </div>
 
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
