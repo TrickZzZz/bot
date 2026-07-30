@@ -8,21 +8,7 @@ logger = logging.getLogger("generator_core")
 def _flog(msg: str) -> None:
     logger.debug(str(msg))
 
-r"""
-DeltaCore Alt Generator - personal panel
-  - Account type dropdown + auto cooldown + daily limits
-  - Per-key live "today" counters (reset midnight UTC) + CD countdown
-  - Vault optional | Persistent Accounts tab with filter/export
-  - Password change via Roblox login (fetches fresh session cookie)
-  - Session summary, pause/resume, dry-run, keyboard shortcuts
-  - DPAPI vault pass (Windows), secret truncation, clipboard timer
-  - In-memory store only (no JSON files on disk)
-  - Vault + DPAPI + full configure UI
 
-Run:      python DeltaCore_Alt_Generator_Personal.py
-"""
-
-from __future__ import annotations
 
 import json
 import os
