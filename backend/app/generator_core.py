@@ -799,6 +799,79 @@ def bloxgen_stock(
         raise BloxgenError(f"stock bad body: {body}", "unknown")
     return data
 
+TWOCAPTCHA_API_KEY = os.environ.get("TWOCAPTCHA_API_KEY", "").strip()
+
+# Roblox's Arkose (FunCaptcha) public key and challenge subdomain used on the
+# login endpoint. These are values embedded in Roblox's own login page JS —
+# not secret, but Roblox can rotate them; if solving stops working, this is
+# the first thing to re-check against the current login page source.
+ROBLOX_ARKOSE_PUBLIC_KEY = "476068BF-9607-4799-B53D-966BE98E2B81"
+ROBLOX_ARKOSE_SURL = "https://roblox-api.arkoselabs.com"
+
+def _solve_arkose_captcha(
+    ssl_ctx: ssl.SSLContext,
+    site_key: str = ROBLOX_ARKOSE_PUBLIC_KEY,
+    surl: str = ROBLOX_ARKOSE_SURL,
+    page_url: str = "https://www.roblox.com/login",
+    max_wait: float = 90.0,
+) -> Tuple[bool, str]:
+    """Solve a Roblox Arkose/FunCaptcha challenge via 2Captcha.
+    Returns (success, token_or_error). Blocks for 15-60s typically —
+    call from a worker thread, never from a request handler directly."""
+    if not TWOCAPTCHA_API_KEY:
+        return False, "no-2captcha-key"
+
+    create_body = {
+        "clientKey": TWOCAPTCHA_API_KEY,
+        "task": {
+            "type": "FunCaptchaTaskProxyless",
+            "websiteURL": page_url,
+            "websitePublicKey": site_key,
+            "funcaptchaApiJSSubdomain": surl,
+        },
+    }
+    try:
+        code, body, _ = _http(
+            "POST", "https://api.2captcha.com/createTask",
+            body=create_body, ssl_ctx=ssl_ctx, timeout=20.0,
+        )
+    except Exception as e:
+        return False, f"2captcha create request failed: {e}"
+    if not isinstance(body, dict) or body.get("errorId"):
+        err = body.get("errorDescription") if isinstance(body, dict) else str(body)
+        return False, f"2captcha create error: {err}"
+    task_id = body.get("taskId")
+    if not task_id:
+        return False, f"2captcha: no taskId in response: {body}"
+
+    # Poll for the result — solving genuinely takes 15-60+ seconds
+    start = time.time()
+    while time.time() - start < max_wait:
+        time.sleep(5.0)
+        try:
+            code, result, _ = _http(
+                "POST", "https://api.2captcha.com/getTaskResult",
+                body={"clientKey": TWOCAPTCHA_API_KEY, "taskId": task_id},
+                ssl_ctx=ssl_ctx, timeout=15.0,
+            )
+        except Exception as e:
+            continue  # transient poll failure — keep trying until max_wait
+        if not isinstance(result, dict):
+            continue
+        status = result.get("status")
+        if status == "ready":
+            sol = result.get("solution") or {}
+            token = sol.get("token")
+            if token:
+                return True, token
+            return False, f"2captcha ready but no token: {result}"
+        if status == "processing":
+            continue
+        if result.get("errorId"):
+            return False, f"2captcha solve error: {result.get('errorDescription')}"
+    return False, "2captcha timeout — solve took too long"
+
+
 def roblox_login(
     username: str,
     password: str,
@@ -806,7 +879,10 @@ def roblox_login(
     timeout: float = 20.0,
     use_proxy: bool = False,
 ) -> Tuple[bool, str]:
-    """Log in to Roblox and return (success, .ROBLOSECURITY cookie or error reason)."""
+    """Log in to Roblox and return (success, .ROBLOSECURITY cookie or error reason).
+
+    If Roblox demands a captcha and TWOCAPTCHA_API_KEY is configured, solves
+    it via 2Captcha and retries once with the solved token."""
     login_url = "https://auth.roblox.com/v2/login"
 
     # Step 1: fetch CSRF token
@@ -821,11 +897,12 @@ def roblox_login(
     if not csrf:
         return False, "csrf-empty"
 
-    # Step 2: login with CSRF token and grab ALL Set-Cookie headers
-    try:
+    def _attempt_login(captcha_token: str) -> Tuple[bool, str, Optional[dict]]:
+        """Returns (success, cookie_or_reason, error_body_if_any)."""
         login_body = json.dumps({
             "ctype": "Username", "cvalue": username, "password": password,
-            "captchaId": "", "captchaToken": "", "captchaProvider": "PROVIDER_ARKOSE_LABS"
+            "captchaId": "", "captchaToken": captcha_token,
+            "captchaProvider": "PROVIDER_ARKOSE_LABS",
         }).encode("utf-8")
         req = urllib.request.Request(
             login_url,
@@ -837,29 +914,50 @@ def roblox_login(
             },
             method="POST",
         )
-        opener = _get_proxy_opener() if (use_proxy and PROXY_URL) else None
-        opened = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
-        with opened as resp:
-            # getheaders() returns ALL headers including multiple Set-Cookie entries
-            all_headers = resp.getheaders()
-            for hdr_name, hdr_val in all_headers:
-                if hdr_name.lower() == "set-cookie" and ".ROBLOSECURITY=" in hdr_val:
-                    for part in hdr_val.split(";"):
-                        part = part.strip()
-                        if part.startswith(".ROBLOSECURITY="):
-                            return True, part.split("=", 1)[1]
-            return False, "no-cookie"
-    except urllib.error.HTTPError as e:
-        raw = e.read() if e.fp else b""
         try:
-            err_body = json.loads(raw.decode("utf-8", errors="replace"))
+            opener = _get_proxy_opener() if (use_proxy and PROXY_URL) else None
+            opened = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
+            with opened as resp:
+                all_headers = resp.getheaders()
+                for hdr_name, hdr_val in all_headers:
+                    if hdr_name.lower() == "set-cookie" and ".ROBLOSECURITY=" in hdr_val:
+                        for part in hdr_val.split(";"):
+                            part = part.strip()
+                            if part.startswith(".ROBLOSECURITY="):
+                                return True, part.split("=", 1)[1], None
+                return False, "no-cookie", None
+        except urllib.error.HTTPError as e:
+            raw = e.read() if e.fp else b""
+            try:
+                err_body = json.loads(raw.decode("utf-8", errors="replace"))
+            except Exception:
+                err_body = {}
             errs = err_body.get("errors") or []
             msg = errs[0].get("message", "") if errs else ""
-            return False, msg or f"http-{e.code}"
-        except Exception:
-            return False, f"http-{e.code}"
-    except Exception as e:
-        return False, f"net:{e}"
+            return False, msg or f"http-{e.code}", err_body
+        except Exception as e:
+            return False, f"net:{e}", None
+
+    ok, reason, err_body = _attempt_login("")
+    if ok:
+        return True, reason
+
+    needs_captcha = bool(err_body) and any(
+        "captcha" in str(v).lower() or "challenge" in str(v).lower()
+        for v in [reason] + [str(e) for e in (err_body.get("errors") or [])]
+    )
+    if not needs_captcha:
+        return False, reason
+
+    if not TWOCAPTCHA_API_KEY:
+        return False, f"{reason} (captcha required, no 2captcha key configured)"
+
+    solved_ok, solved_token = _solve_arkose_captcha(ssl_ctx)
+    if not solved_ok:
+        return False, f"{reason} | captcha solve failed: {solved_token}"
+
+    ok2, reason2, _ = _attempt_login(solved_token)
+    return ok2, reason2
 
 
 def provider_change_password(
