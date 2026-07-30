@@ -6,7 +6,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import {
   Zap, Play, Square, BarChart3, Search, Trash2, RotateCcw,
   Clock, KeyRound, CheckCircle2, XCircle, AlertCircle, Circle,
-  ShieldCheck, Settings2, Users,
+  ShieldCheck, Settings2, Users, UserCog,
 } from "lucide-react"
 
 var STATUS_COLOR = {
@@ -131,6 +131,7 @@ export default function Generator() {
   var logsState = React.useState([]); var logs = logsState[0]; var setLogs = logsState[1]
   var accountsState = React.useState([]); var accounts = accountsState[0]; var setAccounts = accountsState[1]
   var limitsState = React.useState(null); var limits = limitsState[0]; var setLimits = limitsState[1]
+  var usersState = React.useState([]); var usersList = usersState[0]; var setUsersList = usersState[1]
   var tabState = React.useState("feed"); var tab = tabState[0]; var setTab = tabState[1]
   var searchState = React.useState(""); var search = searchState[0]; var setSearch = searchState[1]
   var cfgState = React.useState(null); var cfg = cfgState[0]; var setCfg = cfgState[1]
@@ -178,6 +179,10 @@ export default function Generator() {
     if (tab === "accounts") {
       if (!isAdmin) { setTab("feed"); return }
       loadAccounts()
+    }
+    if (tab === "users") {
+      if (!isAdmin) { setTab("feed"); return }
+      loadUsers()
     }
   }, [tab, search, isAdmin])
 
@@ -241,6 +246,10 @@ export default function Generator() {
     }).catch(function(){})
   }
 
+  function loadUsers() {
+    gapi("/admin/users").then(setUsersList).catch(function(){})
+  }
+
   function clearAccountsList() {
     if (!confirm("Hide all current accounts from this view? New accounts you generate will still show. This does NOT delete anything from the vault.")) return
     gapi("/accounts?limit=5000").then(function(all) {
@@ -275,6 +284,7 @@ export default function Generator() {
     isAdmin ? {id:"accounts", label:"Accounts", icon: Users} : null,
     {id:"limits", label:"Limits", icon: BarChart3},
     {id:"config", label:"Config", icon: Settings2},
+    isAdmin ? {id:"users", label:"Users", icon: UserCog} : null,
   ].filter(Boolean)
 
   // key chips: use live key_states if we have them, otherwise show placeholders sized to configured key count
@@ -568,6 +578,44 @@ export default function Generator() {
                 dirty && !saving && React.createElement("span", {className:"text-sm text-amber-400"}, "Unsaved changes")
               )
             )
+      )
+    ),
+
+    // ── USERS (admin only) ───────────────────────────────────────────────
+    tab === "users" && React.createElement(Card, null,
+      React.createElement(CardContent, {className:"p-4 space-y-3"},
+        React.createElement("div", {className:"flex items-center justify-between"},
+          React.createElement("span", {className:"text-xs text-muted-foreground font-medium tracking-wide"}, "REGISTERED USERS"),
+          React.createElement(Button, {size:"sm", variant:"ghost", onClick:loadUsers, className:"gap-1.5"},
+            React.createElement(RotateCcw, {className:"h-3.5 w-3.5"}), "Refresh"
+          )
+        ),
+        usersList.length === 0
+          ? React.createElement("p", {className:"text-sm text-muted-foreground py-6 text-center"}, "No users found (or still loading)")
+          : React.createElement("table", {className:"w-full text-sm"},
+              React.createElement("thead", null,
+                React.createElement("tr", {className:"border-b border-border text-left text-muted-foreground"},
+                  ["Username","Role"].map(function(h) {
+                    return React.createElement("th", {key:h, className:"font-medium px-3 py-2 text-xs uppercase tracking-wide"}, h)
+                  })
+                )
+              ),
+              React.createElement("tbody", null,
+                usersList.map(function(u, i) {
+                  return React.createElement("tr", {key:i, className:"border-b border-border/60 last:border-0"},
+                    React.createElement("td", {className:"px-3 py-2 text-foreground/90"}, u.username),
+                    React.createElement("td", {className:"px-3 py-2"},
+                      u.is_admin
+                        ? React.createElement("span", {className:"text-xs px-2 py-0.5 rounded-full bg-primary/15 text-primary font-medium"}, "Admin")
+                        : React.createElement("span", {className:"text-xs px-2 py-0.5 rounded-full bg-secondary text-muted-foreground"}, "Standard")
+                    )
+                  )
+                })
+              )
+            ),
+        React.createElement("p", {className:"text-xs text-muted-foreground pt-2"},
+          "Admin status is set by the ADMIN_USERNAMES environment variable on the server — it can't be changed from here."
+        )
       )
     )
   )
