@@ -579,6 +579,32 @@ class Vault:
             raise RuntimeError(f"vault add HTTP {code}: {body}")
         return True
 
+    def update_password(self, username: str, new_password: str) -> Tuple[bool, str]:
+        """Update a stored account's password in the vault.
+
+        No update endpoint is confirmed for this vault API, so this tries the
+        common REST shapes in order and reports which one (if any) succeeded —
+        useful for diagnosing the actual endpoint from the response text if
+        every attempt fails.
+        """
+        if not self.token or not self._token_fresh():
+            self.login()
+        attempts = [
+            ("PATCH", f"{self.base}/accounts/{username}", {"password": new_password}),
+            ("PUT",   f"{self.base}/accounts/{username}", {"password": new_password}),
+            ("POST",  f"{self.base}/accounts/{username}/password", {"password": new_password}),
+        ]
+        last_err = ""
+        for method, url, body in attempts:
+            try:
+                code, resp_body, _ = _http(method, url, headers=self._hdr(), body=body, ssl_ctx=self.ssl_ctx)
+                if 200 <= code < 300:
+                    return True, f"{method} {url}"
+                last_err = f"{method} {url} -> HTTP {code}: {resp_body}"
+            except Exception as e:
+                last_err = f"{method} {url} -> {e}"
+        return False, last_err
+
 # ========== bloxgen ==========
 class BloxgenError(RuntimeError):
     """Categorised Bloxgen error."""
@@ -1129,37 +1155,28 @@ class GeneratorWorker:
                 self.log(f"PW skip {user}: password too short ({len(new_password)} chars, need 8+)", "warn")
                 new_password = ""
             if new_password and not cookie:
-                logger.debug(f"no cookie from bloxgen for {user} — attempting fresh login")
-                login_ok, login_result = roblox_login(user, old_pw, ssl_ctx)
-                if login_ok:
-                    cookie = login_result
-                else:
-                    self.log(f"PW skip {user}: no cookie, login failed ({login_result})", "warn")
+                # No cookie supplied by Bloxgen for this account. A fresh username/password
+                # login is not attempted here: Roblox challenges (Arkose/FunCaptcha)
+                # programmatic logins from datacenter IPs, so it would very likely fail
+                # anyway — better to skip fast with a clear reason than burn a slow,
+                # near-certain-failure login attempt on every no-cookie account.
+                self.log(f"PW skip {user}: no cookie supplied", "warn")
 
             if new_password and cookie:
                 logger.debug(f"pw change for {user}")
                 try:
                     ok, reason = provider_change_password(cookie, old_pw, new_password, ssl_ctx)
                     logger.debug(f"pw change ok={ok} reason={reason}")
-                    # Bloxgen's supplied cookie can be stale/already-invalidated —
-                    # fall back to a fresh login with the account's own credentials
-                    # and retry once before giving up.
-                    if not ok and reason and ("9002" in reason or "authenticat" in reason.lower()):
-                        logger.debug(f"pw change auth failure — attempting fresh login for {user}")
-                        login_ok, login_result = roblox_login(user, old_pw, ssl_ctx)
-                        if login_ok:
-                            fresh_cookie = login_result
-                            ok, reason = provider_change_password(fresh_cookie, old_pw, new_password, ssl_ctx)
-                            logger.debug(f"pw change retry ok={ok} reason={reason}")
-                            if ok:
-                                self.log(f"PW retry OK: {user} (fresh login)", "muted")
-                        else:
-                            reason = f"{reason} | relogin failed: {login_result}"
                     if ok:
                         final_pw = new_password
                         pw_changed = True
                         self.log(f"PW changed: {user}", "ok")
                     else:
+                        # Cookie from Bloxgen was stale/invalid. A fresh re-login is not
+                        # attempted here: Roblox challenges (Arkose/FunCaptcha) programmatic
+                        # logins from datacenter IPs like Railway's, so a retry would almost
+                        # always fail the same way — it just adds latency and a confusing
+                        # second error. Report the original failure plainly instead.
                         self.log(f"PW change failed: {user} ({reason})", "warn")
                 except Exception as exc:
                     logger.debug(f"pw change EXCEPTION: {exc}")

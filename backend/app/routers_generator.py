@@ -310,6 +310,104 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=
         ]
 
 
+@router.post("/accounts/change-passwords")
+def change_unchanged_passwords(_=Depends(get_current_user)):
+    """Bulk password change for vault accounts that haven't been changed yet.
+
+    Each account needs a fresh Roblox login (no cookie is stored in the vault
+    for old accounts). Roblox challenges (Arkose/FunCaptcha) programmatic
+    logins from datacenter IPs like Railway's, so a meaningful fraction of
+    accounts will be skipped — that's expected, not a bug. Progress streams
+    through the same /generator/stream feed as Start/Stats.
+    """
+    if _session.is_running():
+        raise HTTPException(400, "Another job is already running")
+
+    new_password = str(_session.cfg.get("new_password") or "").strip()
+    if len(new_password) < 8:
+        raise HTTPException(400, "Set a new password (8+ chars) in Config first")
+
+    _session._stop.clear()
+    _session.log_q.clear()
+    import uuid as _uuid
+    _session._session_id = _uuid.uuid4().hex[:12]
+
+    def run():
+        from .generator_core import roblox_login, provider_change_password
+        try:
+            ssl_ctx = make_ssl_context(bool(_session.cfg.get("ssl_verify", True)))
+            v = Vault(
+                str(_session.cfg["vault_api"]),
+                str(_session.cfg["vault_user"]),
+                _secure_load("vault_pass", _session.cfg),
+                ssl_ctx,
+            )
+            v.login()
+            code, body, _hdrs = _http("GET", f"{v.base}/accounts", headers=v._hdr(), ssl_ctx=ssl_ctx)
+            if code < 200 or code >= 300:
+                _session.queue_log(f"Could not load vault accounts (HTTP {code})", "error")
+                return
+            raw = body if isinstance(body, list) else (body.get("accounts", []) if isinstance(body, dict) else [])
+
+            targets = []
+            for a in raw:
+                if not isinstance(a, dict):
+                    continue
+                already = bool(a.get("pw_changed") or a.get("password_changed"))
+                if already:
+                    continue
+                user = str(a.get("username") or a.get("user") or "")
+                pw = str(a.get("password") or a.get("pass") or "")
+                if user and pw:
+                    targets.append((user, pw))
+
+            _session.queue_log(f"=== BULK PASSWORD CHANGE ===", "ok")
+            _session.queue_log(f"{len(targets)} unchanged account(s) found", "info")
+
+            changed = skipped = 0
+            for user, old_pw in targets:
+                if _session._stop.is_set():
+                    _session.queue_log("Stopped by user", "warn")
+                    break
+                if old_pw == new_password:
+                    _session.queue_log(f"Skip {user}: already using target password", "muted")
+                    skipped += 1
+                    continue
+                try:
+                    login_ok, login_result = roblox_login(user, old_pw, ssl_ctx)
+                except Exception as e:
+                    login_ok, login_result = False, str(e)
+                if not login_ok:
+                    _session.queue_log(f"Skip {user}: login failed ({login_result})", "warn")
+                    skipped += 1
+                    time.sleep(0.5)
+                    continue
+                ok, reason = provider_change_password(login_result, old_pw, new_password, ssl_ctx)
+                if not ok:
+                    _session.queue_log(f"Skip {user}: PW change failed ({reason})", "warn")
+                    skipped += 1
+                    time.sleep(0.5)
+                    continue
+                pushed, detail = v.update_password(user, new_password)
+                if pushed:
+                    _session.queue_log(f"Changed {user} (vault updated)", "ok")
+                    changed += 1
+                else:
+                    _session.queue_log(f"Changed {user} but vault update failed ({detail})", "warn")
+                    changed += 1
+                time.sleep(0.5)
+
+            _session.queue_log(f"=== DONE — {changed} changed, {skipped} skipped ===", "ok")
+        except Exception as e:
+            _session.queue_log(f"Bulk change error: {e}", "error")
+        finally:
+            _session.queue_log("__done__", "__done__")
+
+    _session.thread = threading.Thread(target=run, daemon=True)
+    _session.thread.start()
+    return {"started": True}
+
+
 @router.get("/limits")
 def get_limits(_=Depends(get_current_user)):
     """Fetch fresh limits from Bloxgen for all keys."""
