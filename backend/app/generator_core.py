@@ -1338,23 +1338,45 @@ class GeneratorWorker:
             if new_password and cookie:
                 logger.debug(f"pw change for {user}")
                 try:
+                    # Step 1: Bloxgen's own cookie, direct from Railway — cheapest, fastest,
+                    # works for the majority of accounts with a still-fresh cookie.
                     ok, reason = provider_change_password(cookie, old_pw, new_password, ssl_ctx)
-                    logger.debug(f"pw change ok={ok} reason={reason}")
-                    # If Railway's own IP got the cookie rejected on auth grounds, retry the
-                    # SAME cookie through the residential proxy before giving up. This is not
-                    # a fresh login (which would introduce a new IP context and risk a
-                    # csrf-rejected mismatch) — it's the identical request, just a cleaner
-                    # exit IP, in case Roblox specifically distrusts Railway's address rather
-                    # than the cookie itself being stale.
+                    logger.debug(f"pw change [1:cookie] ok={ok} reason={reason}")
+
+                    # Step 2: same cookie, same request, routed through the residential
+                    # proxy instead. No new login — just a cleaner exit IP, in case
+                    # Roblox specifically distrusts Railway's address rather than the
+                    # cookie itself being stale.
                     if not ok and reason and PROXY_URL and ("9002" in reason or "authenticat" in reason.lower()):
                         logger.debug(f"pw change auth failure — retrying via proxy for {user}")
-                        ok2, reason2 = provider_change_password(cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
-                        logger.debug(f"pw change proxy retry ok={ok2} reason={reason2}")
-                        if ok2:
-                            ok, reason = ok2, reason2
-                            self.log(f"PW retry OK: {user} (via proxy)", "muted")
+                        ok, reason2 = provider_change_password(cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
+                        logger.debug(f"pw change [2:cookie+proxy] ok={ok} reason={reason2}")
+                        if ok:
+                            self.log(f"PW retry OK: {user} (cookie via proxy)", "muted")
                         else:
                             reason = f"{reason} | proxy retry: {reason2}"
+
+                    # Step 3/4: the cookie itself is a dead end — fall back to a fresh
+                    # username+password login through the proxy. roblox_login() already
+                    # attempts this plain first, and only escalates to a 2Captcha solve
+                    # internally if Roblox actually demands a captcha — so step 3 (plain
+                    # login) and step 4 (login + solved captcha) happen as one call here,
+                    # in that order, automatically.
+                    if not ok and PROXY_URL:
+                        logger.debug(f"cookie exhausted — attempting fresh login for {user}")
+                        login_ok, login_result = roblox_login(user, old_pw, ssl_ctx, use_proxy=True)
+                        if login_ok:
+                            fresh_cookie = login_result
+                            ok3, reason3 = provider_change_password(fresh_cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
+                            logger.debug(f"pw change [3/4:fresh-login+proxy] ok={ok3} reason={reason3}")
+                            if ok3:
+                                ok, reason = ok3, reason3
+                                self.log(f"PW retry OK: {user} (fresh login + proxy)", "muted")
+                            else:
+                                reason = f"{reason} | fresh-login retry: {reason3}"
+                        else:
+                            reason = f"{reason} | fresh-login failed: {login_result}"
+
                     if ok:
                         final_pw = new_password
                         pw_changed = True
