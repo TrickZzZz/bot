@@ -11,7 +11,7 @@ var TYPES = ["+30 days old","+1 year old","5+ years old","dump"]
 var API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000"
 
 function gapi(path, method, body) {
-  var token = localStorage.getItem("access_token")
+  var token = localStorage.getItem("am_access_token")
   var opts = {
     method: method || "GET",
     headers: {Authorization: "Bearer " + token, "Content-Type": "application/json"},
@@ -59,7 +59,7 @@ export default function Generator() {
 
   function startStream() {
     if (esRef.current) esRef.current.close()
-    var token = localStorage.getItem("access_token")
+    var token = localStorage.getItem("am_access_token")
     var es = new EventSource(API_BASE + "/generator/stream?token=" + encodeURIComponent(token || ""))
     esRef.current = es
     es.onmessage = function(e) {
