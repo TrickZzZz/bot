@@ -153,6 +153,12 @@ class _Session:
 
 _session = _Session()
 
+# Maps a run's session_id -> the username who started it. Lets non-admins see
+# accounts THEY generated (via the existing local append_account/session_id
+# mechanism) without exposing the shared vault to them at all.
+_session_owner_by_id: Dict[str, str] = {}
+_session_owner_lock = threading.Lock()
+
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
 class GeneratorConfig(BaseModel):
@@ -219,6 +225,8 @@ def start_session(config: GeneratorConfig, user=Depends(get_current_user)):
 
     import uuid as _uuid
     _session._session_id = _uuid.uuid4().hex[:12]
+    with _session_owner_lock:
+        _session_owner_by_id[_session._session_id] = str(getattr(user, "username", "")).strip().lower()
     _session.usage = load_usage()
 
     worker = GeneratorWorker(
@@ -337,12 +345,32 @@ def get_config(user=Depends(get_current_user)):
 
 
 @router.get("/accounts")
-def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=Depends(require_admin)):
-    """Fetch accounts from vault (source of truth — Railway has no persistent disk
-    for the local .deltacore_accounts.json fallback)."""
+def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, user=Depends(get_current_user)):
+    """Admins: fetch the full vault (source of truth). Non-admins: fetch only
+    accounts they personally generated, from the local store, filtered by
+    which session_id belongs to them — the shared vault is never touched or
+    exposed for a non-admin request."""
     s = (search or "").strip().lower()
     t = (account_type or "").strip().lower()
-    limit = max(1, min(limit, 5000))  # sane bounds — vault could theoretically have thousands
+    limit = max(1, min(limit, 5000))
+
+    if not _is_admin(user):
+        my_username = str(getattr(user, "username", "")).strip().lower()
+        with _session_owner_lock:
+            my_session_ids = {
+                sid for sid, owner in _session_owner_by_id.items() if owner == my_username
+            }
+        accounts = filter_accounts(search=search, account_type=account_type or "")
+        mine = [
+            a for a in accounts
+            if str(a.get("session_id") or "") in my_session_ids
+        ]
+        return [
+            {**a, "pass": a.get("pass", ""), "date": _format_vault_date(a.get("date")),
+             "vault_pushed": False}  # non-admins can never push to vault — always accurate
+            for a in mine[:limit]
+        ]
+
     try:
         ssl_ctx = make_ssl_context(bool(_session.cfg.get("ssl_verify", True)))
         v = Vault(
@@ -374,10 +402,10 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=
         for a in raw:
             if not isinstance(a, dict):
                 continue
-            user = str(a.get("username") or a.get("user") or "")
+            acc_user = str(a.get("username") or a.get("user") or "")
             pw = str(a.get("password") or a.get("pass") or "")
             a_type = str(a.get("type") or a.get("account_type") or "")
-            if s and s not in user.lower() and s not in pw.lower():
+            if s and s not in acc_user.lower() and s not in pw.lower():
                 continue
             if t and a_type.strip().lower() != t:
                 continue
@@ -386,7 +414,7 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=
             else:
                 pw_changed_flag = bool(a.get("pw_changed") or a.get("password_changed"))
             accounts.append({
-                "user": user,
+                "user": acc_user,
                 "pass": pw,  # full password — private single-user tool, not exposed publicly
                 "date": _format_vault_date(a.get("date") or a.get("created_at") or a.get("createdAt")),
                 "age": a.get("age") or "—",
@@ -537,9 +565,23 @@ def change_unchanged_passwords(_=Depends(require_admin)):
     return {"started": True}
 
 
+_limits_cache: Dict[str, Any] = {"data": None, "ts": 0.0}
+_limits_cache_lock = threading.Lock()
+_LIMITS_CACHE_TTL = 45.0  # seconds — shared across every connected user, not per-request
+
+
 @router.get("/limits")
 def get_limits(_=Depends(get_current_user)):
-    """Fetch fresh limits from Bloxgen for all keys."""
+    """Fetch limits from Bloxgen for all keys, cached briefly and shared across
+    every connected user. Without this, N people with the Limits tab open each
+    poll independently, multiplying real Bloxgen API calls by N and risking
+    Bloxgen's own rate limit — one fetch should serve everyone."""
+    with _limits_cache_lock:
+        cached = _limits_cache["data"]
+        age = time.time() - _limits_cache["ts"]
+        if cached is not None and age < _LIMITS_CACHE_TTL:
+            return cached
+
     keys = _get_keys(_session.cfg.get("bloxgen_keys") or [])
     if not keys:
         raise HTTPException(400, "No API keys configured")
@@ -601,7 +643,7 @@ def get_limits(_=Depends(get_current_user)):
             stock_error = str(e)
             continue
 
-    return {
+    response = {
         "limits": results,
         "stock": stock,
         "types": ACCOUNT_TYPES,
@@ -609,6 +651,12 @@ def get_limits(_=Depends(get_current_user)):
         "quota": type_agg,       # per-type remaining/dailyLimit/generationsToday, summed across keys
         "reset_time": reset_time,
     }
+
+    with _limits_cache_lock:
+        _limits_cache["data"] = response
+        _limits_cache["ts"] = time.time()
+
+    return response
 
 
 @router.get("/stream")
