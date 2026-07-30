@@ -302,6 +302,12 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=
         elif isinstance(body, dict):
             raw = body.get("accounts", [])
 
+        # The vault doesn't reliably track a pw_changed flag, so determine it
+        # deterministically: does this account's current password already
+        # match the configured target? If new_password isn't set, fall back
+        # to the vault's own flag (if it happens to exist) as a soft signal.
+        configured_new_pw = str(_session.cfg.get("new_password") or "").strip()
+
         accounts = []
         for a in raw:
             if not isinstance(a, dict):
@@ -313,13 +319,17 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=
                 continue
             if t and a_type.strip().lower() != t:
                 continue
+            if configured_new_pw:
+                pw_changed_flag = (pw == configured_new_pw)
+            else:
+                pw_changed_flag = bool(a.get("pw_changed") or a.get("password_changed"))
             accounts.append({
                 "user": user,
                 "pass": pw,  # full password — private single-user tool, not exposed publicly
                 "date": _format_vault_date(a.get("date") or a.get("created_at") or a.get("createdAt")),
                 "age": a.get("age") or "—",
                 "type": a_type or "—",
-                "pw_changed": bool(a.get("pw_changed") or a.get("password_changed")),
+                "pw_changed": pw_changed_flag,
                 "vault_pushed": True,
             })
         return accounts[:limit]
@@ -375,18 +385,21 @@ def change_unchanged_passwords(_=Depends(get_current_user)):
             for a in raw:
                 if not isinstance(a, dict):
                     continue
-                already = bool(a.get("pw_changed") or a.get("password_changed"))
-                if already:
-                    continue
                 user = str(a.get("username") or a.get("user") or "")
                 pw = str(a.get("password") or a.get("pass") or "")
-                if user and pw:
-                    targets.append((user, pw))
+                if not user or not pw:
+                    continue
+                # The vault doesn't reliably track a pw_changed flag — trust
+                # the actual stored password instead. If it already matches
+                # the target, there's genuinely nothing to do for this account.
+                if pw == new_password:
+                    continue
+                targets.append((user, pw))
 
             _session.queue_log(f"=== BULK PASSWORD CHANGE ===", "ok")
-            _session.queue_log(f"{len(targets)} unchanged account(s) found", "info")
+            _session.queue_log(f"{len(targets)} account(s) not yet on the target password", "info")
             if not targets:
-                _session.queue_log("Nothing to do — every vault account already shows pw_changed=true", "info")
+                _session.queue_log("Nothing to do — every vault account already has the target password", "info")
 
             changed = 0
             skip_reasons: Dict[str, int] = {}
