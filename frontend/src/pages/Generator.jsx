@@ -23,6 +23,19 @@ function gapi(path, method, body) {
   })
 }
 
+var HIDDEN_KEY = "generator_hidden_accounts"
+
+function getHiddenSet() {
+  try {
+    var raw = localStorage.getItem(HIDDEN_KEY)
+    return raw ? new Set(JSON.parse(raw)) : new Set()
+  } catch (e) { return new Set() }
+}
+
+function setHiddenSet(set) {
+  try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(Array.from(set))) } catch (e) {}
+}
+
 export default function Generator() {
   var statusState = React.useState(null); var status = statusState[0]; var setStatus = statusState[1]
   var logsState = React.useState([]); var logs = logsState[0]; var setLogs = logsState[1]
@@ -96,7 +109,25 @@ export default function Generator() {
   }
 
   function loadAccounts() {
-    gapi("/accounts?search=" + encodeURIComponent(search)).then(setAccounts).catch(function(){})
+    gapi("/accounts?search=" + encodeURIComponent(search)).then(function(list) {
+      var hidden = getHiddenSet()
+      setAccounts(list.filter(function(a) { return !hidden.has(a.user) }))
+    }).catch(function(){})
+  }
+
+  function clearAccountsList() {
+    if (!confirm("Hide all current accounts from this view? New accounts you generate will still show. This does NOT delete anything from the vault.")) return
+    gapi("/accounts?limit=5000").then(function(all) {
+      var hidden = getHiddenSet()
+      all.forEach(function(a) { hidden.add(a.user) })
+      setHiddenSet(hidden)
+      loadAccounts()
+    }).catch(function(e) { alert(e.message) })
+  }
+
+  function showAllAccounts() {
+    setHiddenSet(new Set())
+    loadAccounts()
   }
 
   function upd(key, val) {
@@ -195,8 +226,10 @@ export default function Generator() {
 
     tab === "accounts" && React.createElement(Card, null,
       React.createElement(CardContent, {className:"p-4 space-y-3"},
-        React.createElement("div", {className:"flex gap-2"},
-          React.createElement(Input, {value:search, onChange:function(e){setSearch(e.target.value)}, placeholder:"Search accounts..."}),
+        React.createElement("div", {className:"flex gap-2 flex-wrap items-center"},
+          React.createElement(Input, {value:search, onChange:function(e){setSearch(e.target.value)}, placeholder:"Search accounts...", className:"flex-1 min-w-[180px]"}),
+          React.createElement(Button, {size:"sm", variant:"outline", onClick:clearAccountsList}, "Clear list"),
+          React.createElement(Button, {size:"sm", variant:"ghost", onClick:showAllAccounts}, "Show all"),
           React.createElement("span", {className:"text-sm text-muted-foreground self-center whitespace-nowrap"}, accounts.length + " accounts")
         ),
         React.createElement("div", {style:{overflowX:"auto"}},
@@ -235,7 +268,7 @@ export default function Generator() {
               React.createElement("table", {className:"w-full text-sm"},
                 React.createElement("thead", null,
                   React.createElement("tr", {className:"border-b border-border text-left text-muted-foreground"},
-                    ["Type","Stock","Status"].map(function(h) {
+                    ["Type","Remaining","Used / Limit","Status"].map(function(h) {
                       return React.createElement("th", {key:h, className:"font-medium px-3 py-2"}, h)
                     })
                   )
@@ -243,6 +276,7 @@ export default function Generator() {
                 React.createElement("tbody", null,
                   (limits.types || TYPES).map(function(t) {
                     var s = limits.stock && limits.stock[t]
+                    var q = limits.quota && limits.quota[t]
                     var has = s ? s.available : null
                     var statusEl = has === null
                       ? React.createElement("span", {className:"text-muted-foreground"}, "N/A")
@@ -250,15 +284,21 @@ export default function Generator() {
                         ? React.createElement("span", {className:"text-green-400"}, "in stock")
                         : React.createElement("span", {className:"text-red-400"}, "no stock")
                     var typeName = t ? String(t) : "—"
-                    var stockCount = s && (s.count || s.quantity || s.stock) ? (s.count || s.quantity || s.stock) : "—"
+                    var remaining = q ? q.remainingGenerations : null
+                    var remainingEl = remaining === null
+                      ? React.createElement("span", {className:"text-muted-foreground"}, "—")
+                      : React.createElement("span", {className: remaining > 0 ? "text-green-400" : "text-red-400"}, String(remaining))
+                    var usedLimit = q ? (q.generationsToday + " / " + q.dailyLimit) : "—"
                     return React.createElement("tr", {key:typeName, className:"border-b border-border/60 last:border-0"},
                       React.createElement("td", {className:"px-3 py-2 font-medium"}, typeName),
-                      React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, stockCount),
+                      React.createElement("td", {className:"px-3 py-2"}, remainingEl),
+                      React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, usedLimit),
                       React.createElement("td", {className:"px-3 py-2"}, statusEl)
                     )
                   })
                 )
-              )
+              ),
+              limits.reset_time && React.createElement("p", {className:"text-xs text-muted-foreground mt-3"}, "Resets: " + limits.reset_time)
             )
       )
     ),
