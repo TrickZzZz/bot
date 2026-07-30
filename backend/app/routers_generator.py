@@ -253,11 +253,12 @@ def get_config(_=Depends(get_current_user)):
 
 
 @router.get("/accounts")
-def get_accounts(search: str = "", account_type: str = "", _=Depends(get_current_user)):
+def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=Depends(get_current_user)):
     """Fetch accounts from vault (source of truth — Railway has no persistent disk
     for the local .deltacore_accounts.json fallback)."""
     s = (search or "").strip().lower()
     t = (account_type or "").strip().lower()
+    limit = max(1, min(limit, 5000))  # sane bounds — vault could theoretically have thousands
     try:
         ssl_ctx = make_ssl_context(bool(_session.cfg.get("ssl_verify", True)))
         v = Vault(
@@ -299,13 +300,13 @@ def get_accounts(search: str = "", account_type: str = "", _=Depends(get_current
                 "pw_changed": bool(a.get("pw_changed") or a.get("password_changed")),
                 "vault_pushed": True,
             })
-        return accounts[:200]
+        return accounts[:limit]
     except Exception as e:
         # Fallback to local file (only useful if a disk-backed run wrote it)
         accounts = filter_accounts(search=search, account_type=account_type or "")
         return [
             {**a, "pass": a["pass"][:2] + "***" + a["pass"][-2:] if len(a.get("pass", "")) > 4 else "***"}
-            for a in accounts[:200]
+            for a in accounts[:limit]
         ]
 
 
@@ -327,6 +328,40 @@ def get_limits(_=Depends(get_current_user)):
                 results.append(fut.result())
             except Exception:
                 pass
+
+    # Aggregate remainingGenerations/dailyLimit/generationsToday per account
+    # type across all keys — matches the desktop app's _merge_daily_limits.
+    type_agg: Dict[str, Dict[str, Any]] = {}
+    reset_time = ""
+    for lim in results:
+        if not isinstance(lim, dict):
+            continue
+        rt = str(lim.get("resetTime") or "")
+        if rt and (not reset_time or rt < reset_time):
+            reset_time = rt
+        for item in lim.get("accountTypes") or []:
+            if not isinstance(item, dict):
+                continue
+            at = item.get("accountType")
+            if not at:
+                continue
+            at = str(at)
+            bucket = type_agg.setdefault(at, {
+                "generationsToday": 0,
+                "dailyLimit": 0,
+                "remainingGenerations": 0,
+                "canGenerate": False,
+            })
+            tu = int(item.get("generationsToday") or 0)
+            td = int(item.get("dailyLimit") or 0)
+            tl = item.get("remainingGenerations")
+            tl = int(tl) if tl is not None else max(0, td - tu)
+            bucket["generationsToday"] += tu
+            bucket["dailyLimit"] += td
+            bucket["remainingGenerations"] += tl
+            if bool(item.get("canGenerate", tl > 0)):
+                bucket["canGenerate"] = True
+
     stock: Dict[str, Any] = {}
     stock_error = None
     for k in keys:
@@ -344,6 +379,8 @@ def get_limits(_=Depends(get_current_user)):
         "stock": stock,
         "types": ACCOUNT_TYPES,
         "stock_error": stock_error if not stock else None,
+        "quota": type_agg,       # per-type remaining/dailyLimit/generationsToday, summed across keys
+        "reset_time": reset_time,
     }
 
 
