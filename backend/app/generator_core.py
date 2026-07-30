@@ -4,17 +4,15 @@ import os
 import sys
 import logging
 
-logger = logging.getLogger("generator_core")
-logger.setLevel(logging.DEBUG)
-if not logger.handlers:
-    _h = logging.StreamHandler(sys.stdout)
-    _h.setLevel(logging.DEBUG)
-    _h.setFormatter(logging.Formatter("[%(name)s] %(message)s"))
-    logger.addHandler(_h)
-    logger.propagate = False  # don't also dump through uvicorn's root handler
+# Real diagnostic output uses plain print(flush=True), not the logging module.
+# Some hosting platforms replace/wrap sys.stdout at container startup before
+# this module imports, so a logging.StreamHandler that grabbed a reference to
+# stdout at import time can end up writing to a stream nobody's watching.
+# print() looks up sys.stdout fresh on every call, sidestepping that entirely.
+logger = logging.getLogger("generator_core")  # kept for compatibility with existing calls
 
 def _flog(msg: str) -> None:
-    logger.debug(str(msg))
+    print(f"[generator_core] {msg}", file=sys.stdout, flush=True)
 
 
 
@@ -298,9 +296,9 @@ def append_account(
         "session_id": session_id or "",
     }
     if not username:
-        logger.debug("append_account: empty username — skipping")
+        _flog("append_account: empty username — skipping")
         return {}
-    logger.debug(f"append_account {username}")
+    _flog(f"append_account {username}")
     snapshot = None
     with _lock_accounts:
         if username in _ACCOUNT_USERS:
@@ -320,9 +318,9 @@ def append_account(
         if time.time() - _last_accounts_flush >= _ACCOUNTS_FLUSH_INTERVAL:
             snapshot = list(_MEM_ACCOUNTS)
     if snapshot is not None:
-        logger.debug("flushing accounts to disk")
+        _flog("flushing accounts to disk")
         _flush_accounts_to_disk(snapshot)
-    logger.debug("append_account done")
+    _flog("append_account done")
     return entry
 
 def is_duplicate(username: str) -> bool:
@@ -1020,7 +1018,7 @@ def roblox_login(
     # generic solve (no blob) can fail even when everything else is correct.
     # This line only goes to Railway's log output (stdout), never to the
     # user-facing feed, since it may contain internal Roblox response fields.
-    logger.debug(f"roblox captcha challenge full body for {username}: {err_body}")
+    _flog(f"roblox captcha challenge full body for {username}: {err_body}")
 
     if not TWOCAPTCHA_API_KEY:
         return False, f"{reason} (captcha required, no 2captcha key configured)"
@@ -1184,10 +1182,10 @@ class GeneratorWorker:
         return False
 
     def run(self) -> RunStats:
-        logger.debug("worker.run() START")
+        _flog("worker.run() START")
         keys = _get_keys(self.cfg_snapshot.get("bloxgen_keys") or [])
         if not keys:
-            logger.debug("NO KEYS — returning")
+            _flog("NO KEYS — returning")
             self.log("No API keys", "error")
             return self.stats
 
@@ -1220,11 +1218,11 @@ class GeneratorWorker:
                 vault_stock_n = n  # track locally to avoid a round-trip per account
                 msg = f"Vault OK - {who}" + (f" - {n} stock" if n >= 0 else "")
                 self.log(msg, "ok")
-                logger.debug(f"vault OK who={who} stock={n}")
+                _flog(f"vault OK who={who} stock={n}")
                 if n >= 0:
                     self.stats_cb(self.stats, f"stock:{n}")
             except Exception as e:
-                logger.debug(f"vault FAIL: {e}")
+                _flog(f"vault FAIL: {e}")
                 self.log(f"Vault failed (local only): {e}", "warn")
                 vault = None
 
@@ -1236,11 +1234,11 @@ class GeneratorWorker:
         )
 
         if dry_run:
-            logger.debug("dry_run — calling _run_dry")
+            _flog("dry_run — calling _run_dry")
             self._run_dry(keys, account_type, cooldown, daily_limit, vault)
-            logger.debug("_run_dry complete")
+            _flog("_run_dry complete")
             return self.stats
-        logger.debug(f"main loop START — {len(keys)} keys cooldown={cooldown}")
+        _flog(f"main loop START — {len(keys)} keys cooldown={cooldown}")
         key_i = 0
         _consec_empty = 0  # round-robin index
 
@@ -1360,7 +1358,7 @@ class GeneratorWorker:
             age_label = result.get("age") or "?"
             final_pw = old_pw
             pw_changed = False
-            logger.debug(f"generate OK user={user}")
+            _flog(f"generate OK user={user}")
             _consec_empty = 0  # reset consecutive empty counter on success
 
             new_password = (self.cfg_snapshot.get("new_password") or "").strip()
@@ -1376,21 +1374,21 @@ class GeneratorWorker:
                 self.log(f"PW skip {user}: no cookie supplied", "warn")
 
             if new_password and cookie:
-                logger.debug(f"pw change for {user}")
+                _flog(f"pw change for {user}")
                 try:
                     # Step 1: Bloxgen's own cookie, direct from Railway — cheapest, fastest,
                     # works for the majority of accounts with a still-fresh cookie.
                     ok, reason = provider_change_password(cookie, old_pw, new_password, ssl_ctx)
-                    logger.debug(f"pw change [1:cookie] ok={ok} reason={reason}")
+                    _flog(f"pw change [1:cookie] ok={ok} reason={reason}")
 
                     # Step 2: same cookie, same request, routed through the residential
                     # proxy instead. No new login — just a cleaner exit IP, in case
                     # Roblox specifically distrusts Railway's address rather than the
                     # cookie itself being stale.
                     if not ok and reason and PROXY_URL and ("9002" in reason or "authenticat" in reason.lower()):
-                        logger.debug(f"pw change auth failure — retrying via proxy for {user}")
+                        _flog(f"pw change auth failure — retrying via proxy for {user}")
                         ok, reason2 = provider_change_password(cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
-                        logger.debug(f"pw change [2:cookie+proxy] ok={ok} reason={reason2}")
+                        _flog(f"pw change [2:cookie+proxy] ok={ok} reason={reason2}")
                         if ok:
                             self.log(f"PW retry OK: {user} (cookie via proxy)", "muted")
                         else:
@@ -1403,12 +1401,12 @@ class GeneratorWorker:
                     # login) and step 4 (login + solved captcha) happen as one call here,
                     # in that order, automatically.
                     if not ok and PROXY_URL:
-                        logger.debug(f"cookie exhausted — attempting fresh login for {user}")
+                        _flog(f"cookie exhausted — attempting fresh login for {user}")
                         login_ok, login_result = roblox_login(user, old_pw, ssl_ctx, use_proxy=True)
                         if login_ok:
                             fresh_cookie = login_result
                             ok3, reason3 = provider_change_password(fresh_cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
-                            logger.debug(f"pw change [3/4:fresh-login+proxy] ok={ok3} reason={reason3}")
+                            _flog(f"pw change [3/4:fresh-login+proxy] ok={ok3} reason={reason3}")
                             if ok3:
                                 ok, reason = ok3, reason3
                                 self.log(f"PW retry OK: {user} (fresh login + proxy)", "muted")
@@ -1424,7 +1422,7 @@ class GeneratorWorker:
                     else:
                         self.log(f"PW change failed: {user} ({reason})", "warn")
                 except Exception as exc:
-                    logger.debug(f"pw change EXCEPTION: {exc}")
+                    _flog(f"pw change EXCEPTION: {exc}")
                     self.log(f"PW change error: {exc}", "warn")
 
             self.key_cb(api_num, "ok", f"{new_count}/{daily_limit}")
@@ -1435,13 +1433,13 @@ class GeneratorWorker:
 
             vault_pushed = False
             if vault and not already_local:
-                logger.debug(f"vault.add_account for {user}")
+                _flog(f"vault.add_account for {user}")
                 try:
                     pushed = vault.add_account(
                         user, final_pw, idempotent=False,  # dup already checked locally
                         age=normalize_age(age_label), account_type=account_type, pw_changed=pw_changed,
                     )
-                    logger.debug(f"vault.add_account pushed={pushed}")
+                    _flog(f"vault.add_account pushed={pushed}")
                     vault_pushed = pushed
                     if pushed:
                         if vault_stock_n >= 0:
@@ -1452,25 +1450,25 @@ class GeneratorWorker:
                     else:
                         self.log(f"Vault skip {user} - already exists", "muted")
                 except Exception as e:
-                    logger.debug(f"vault.add_account EXCEPTION: {e}")
+                    _flog(f"vault.add_account EXCEPTION: {e}")
                     self.log(f"Vault add fail {user}: {e}", "warn")
 
-            logger.debug(f"account_cb for {user}")
+            _flog(f"account_cb for {user}")
             api_tail = key_tail(picked_key)
             self.account_cb(
                 user, final_pw, old_pw, age_label, account_type,
                 pw_changed, vault_pushed, api_tail,
             )
-            logger.debug("account_cb done")
+            _flog("account_cb done")
 
             self.stats.done += 1
             self.stats_cb(self.stats, "running")
-            logger.debug(f"stats done={self.stats.done} — key API{api_num} ready in {cooldown:.0f}s")
+            _flog(f"stats done={self.stats.done} — key API{api_num} ready in {cooldown:.0f}s")
             # No gap here — key_ready[picked_key] already set to time.time()+cooldown above.
             # The loop top picks the next ready key immediately, or waits only as long as needed.
             self._gap(0.05)  # tiny yield so UI pump can drain between generates
 
-        logger.debug(f"main loop EXIT stopped={self.should_stop()}")
+        _flog(f"main loop EXIT stopped={self.should_stop()}")
         self.stats.stopped_manually = self.should_stop()
         self.stats_cb(self.stats, "stopped")
         return self.stats
@@ -1484,7 +1482,7 @@ class GeneratorWorker:
         vault: Optional[Vault],
     ) -> None:
         """Dry-run: validate keys, vault, show planned pacing without generating."""
-        logger.debug(f"_run_dry START keys={len(keys)} type={account_type}")
+        _flog(f"_run_dry START keys={len(keys)} type={account_type}")
         ssl_ctx = make_ssl_context(bool(self.cfg_snapshot.get("ssl_verify", True)))
         self.log("=== DRY RUN ===", "ok")
         self.log(f"Type: {account_type} | CD: {cooldown:.0f}s | Limit: {daily_limit}/key/day", "info")
@@ -1548,7 +1546,7 @@ class GeneratorWorker:
             self.log(f"Est. throughput: {rate:.1f}/min | Max today: {limit_total}", "muted")
 
         self.log("=== DRY RUN COMPLETE ===", "ok")
-        logger.debug("_run_dry COMPLETE")
+        _flog("_run_dry COMPLETE")
 
 # Precompiled log-sanitize patterns — applied once per message via _sanitize_log()
 _RE_ROBLOSEC = re.compile(
