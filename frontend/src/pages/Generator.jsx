@@ -176,10 +176,7 @@ export default function Generator() {
   }, [logs])
 
   React.useEffect(function() {
-    if (tab === "accounts") {
-      if (!isAdmin) { setTab("feed"); return }
-      loadAccounts()
-    }
+    if (tab === "accounts") loadAccounts()
     if (tab === "users") {
       if (!isAdmin) { setTab("feed"); return }
       loadUsers()
@@ -281,7 +278,7 @@ export default function Generator() {
 
   var tabs = [
     {id:"feed", label:"Live Feed", icon: Circle},
-    isAdmin ? {id:"accounts", label:"Accounts", icon: Users} : null,
+    {id:"accounts", label: isAdmin ? "Accounts" : "My Accounts", icon: Users},
     {id:"limits", label:"Limits", icon: BarChart3},
     {id:"config", label:"Config", icon: Settings2},
     isAdmin ? {id:"users", label:"Users", icon: UserCog} : null,
@@ -403,17 +400,17 @@ export default function Generator() {
             React.createElement(Search, {className:"absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground"}),
             React.createElement(Input, {value:search, onChange:function(e){setSearch(e.target.value)}, placeholder:"Search accounts...", className:"pl-8"})
           ),
-          React.createElement(Button, {size:"sm", variant:"outline", onClick:clearAccountsList, className:"gap-1.5"},
+          isAdmin && React.createElement(Button, {size:"sm", variant:"outline", onClick:clearAccountsList, className:"gap-1.5"},
             React.createElement(Trash2, {className:"h-3.5 w-3.5"}), "Clear list"
           ),
-          hasHidden && React.createElement(Button, {size:"sm", variant:"ghost", onClick:showAllAccounts, className:"gap-1.5"},
+          isAdmin && hasHidden && React.createElement(Button, {size:"sm", variant:"ghost", onClick:showAllAccounts, className:"gap-1.5"},
             React.createElement(RotateCcw, {className:"h-3.5 w-3.5"}), "Show all"
           ),
-          React.createElement(Button, {size:"sm", variant:"outline", disabled:running, onClick:handleChangeUnchangedPasswords, className:"gap-1.5"},
+          isAdmin && React.createElement(Button, {size:"sm", variant:"outline", disabled:running, onClick:handleChangeUnchangedPasswords, className:"gap-1.5"},
             React.createElement(ShieldCheck, {className:"h-3.5 w-3.5"}), "Change unchanged passwords"
           ),
           React.createElement("div", {className:"flex items-center gap-1.5 text-xs text-muted-foreground whitespace-nowrap ml-auto"},
-            hasHidden && React.createElement("span", {className:"px-1.5 py-0.5 rounded bg-secondary text-[10px] font-medium"}, "filtered"),
+            isAdmin && hasHidden && React.createElement("span", {className:"px-1.5 py-0.5 rounded bg-secondary text-[10px] font-medium"}, "filtered"),
             accounts.length + " accounts"
           )
         ),
@@ -421,7 +418,9 @@ export default function Generator() {
           ? React.createElement("div", {className:"py-10 text-center"},
               React.createElement(Users, {className:"h-8 w-8 mx-auto text-muted-foreground/40 mb-2"}),
               React.createElement("p", {className:"text-sm text-muted-foreground"},
-                hasHidden ? "No new accounts yet — generate some or press Show all." : "No accounts match your search.")
+                isAdmin
+                  ? (hasHidden ? "No new accounts yet — generate some or press Show all." : "No accounts match your search.")
+                  : "You haven't generated any accounts yet — press Start to make some.")
             )
           : React.createElement("div", {style:{overflowX:"auto"}},
               React.createElement("table", {className:"w-full text-sm"},
