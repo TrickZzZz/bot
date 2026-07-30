@@ -42,12 +42,7 @@ export default function Generator() {
       setCfg({account_type:"+30 days old",new_password:"",target_count:0,vault_enabled:true,ssl_verify:true,bloxgen_keys:[],consecutive_empty_stop:5})
     })
     function poll() { gapi("/status").then(setStatus).catch(function(){}) }
-    function pollLimits() { 
-      gapi("/limits").then(function(d) {
-        console.log("limits response:", JSON.stringify(d).slice(0,300))
-        setLimits(d)
-      }).catch(function(){}) 
-    }
+    function pollLimits() { gapi("/limits").then(setLimits).catch(function(){}) }
     poll(); pollLimits()
     var t = setInterval(poll, 2000)
     var tl = setInterval(pollLimits, 120000)
@@ -235,31 +230,34 @@ export default function Generator() {
       React.createElement(CardContent, {className:"p-4"},
         !limits
           ? React.createElement("p", {className:"text-sm text-muted-foreground"}, "Loading stock status...")
-          : React.createElement("table", {className:"w-full text-sm"},
-              React.createElement("thead", null,
-                React.createElement("tr", {className:"border-b border-border text-left text-muted-foreground"},
-                  ["Type","Stock","Status"].map(function(h) {
-                    return React.createElement("th", {key:h, className:"font-medium px-3 py-2"}, h)
+          : React.createElement(React.Fragment, null,
+              limits.stock_error && React.createElement("p", {className:"text-sm text-red-400 mb-3"}, "Stock check failed: " + limits.stock_error),
+              React.createElement("table", {className:"w-full text-sm"},
+                React.createElement("thead", null,
+                  React.createElement("tr", {className:"border-b border-border text-left text-muted-foreground"},
+                    ["Type","Stock","Status"].map(function(h) {
+                      return React.createElement("th", {key:h, className:"font-medium px-3 py-2"}, h)
+                    })
+                  )
+                ),
+                React.createElement("tbody", null,
+                  (limits.types || TYPES).map(function(t) {
+                    var s = limits.stock && limits.stock[t]
+                    var has = s ? s.available : null
+                    var statusEl = has === null
+                      ? React.createElement("span", {className:"text-muted-foreground"}, "N/A")
+                      : has
+                        ? React.createElement("span", {className:"text-green-400"}, "in stock")
+                        : React.createElement("span", {className:"text-red-400"}, "no stock")
+                    var typeName = t ? String(t) : "—"
+                    var stockCount = s && (s.count || s.quantity || s.stock) ? (s.count || s.quantity || s.stock) : "—"
+                    return React.createElement("tr", {key:typeName, className:"border-b border-border/60 last:border-0"},
+                      React.createElement("td", {className:"px-3 py-2 font-medium"}, typeName),
+                      React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, stockCount),
+                      React.createElement("td", {className:"px-3 py-2"}, statusEl)
+                    )
                   })
                 )
-              ),
-              React.createElement("tbody", null,
-                (limits.types || TYPES).map(function(t) {
-                  var s = limits.stock && limits.stock[t]
-                  var has = s ? s.available : null
-                  var statusEl = has === null
-                    ? React.createElement("span", {className:"text-muted-foreground"}, "N/A")
-                    : has
-                      ? React.createElement("span", {className:"text-green-400"}, "in stock")
-                      : React.createElement("span", {className:"text-red-400"}, "no stock")
-                  var typeName = t ? String(t) : "—"
-                  var stockCount = s && (s.count || s.quantity || s.stock) ? (s.count || s.quantity || s.stock) : "—"
-                  return React.createElement("tr", {key:typeName, className:"border-b border-border/60 last:border-0"},
-                    React.createElement("td", {className:"px-3 py-2 font-medium"}, typeName),
-                    React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, stockCount),
-                    React.createElement("td", {className:"px-3 py-2"}, statusEl)
-                  )
-                })
               )
             )
       )
