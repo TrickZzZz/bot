@@ -129,7 +129,7 @@ def start_session(config: GeneratorConfig, _=Depends(get_current_user)):
     _session.usage = load_usage()
 
     worker = GeneratorWorker(
-        cfg_snapshot=cfg,
+        cfg=cfg,
         usage=_session.usage,
         log=_session.queue_log,
         stats_cb=_session.queue_stats,
@@ -188,7 +188,7 @@ def dry_run(_=Depends(get_current_user)):
     _session.usage = load_usage()
 
     worker = GeneratorWorker(
-        cfg_snapshot=cfg,
+        cfg=cfg,
         usage=_session.usage,
         log=_session.queue_log,
         stats_cb=_session.queue_stats,
