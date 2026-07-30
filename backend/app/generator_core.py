@@ -282,6 +282,7 @@ def append_account(
     vault_pushed: bool,
     api_key_tail: str,
     session_id: str,
+    generated_by: str = "",
 ) -> Dict[str, Any]:
     entry: Dict[str, Any] = {
         "user": username,
@@ -294,6 +295,7 @@ def append_account(
         "vault_pushed": vault_pushed,
         "api_key_tail": api_key_tail or "",
         "session_id": session_id or "",
+        "generated_by": (generated_by or "").strip().lower(),
     }
     if not username:
         _flog("append_account: empty username — skipping")

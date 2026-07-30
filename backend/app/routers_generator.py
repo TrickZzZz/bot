@@ -92,6 +92,7 @@ class _Session:
         self.stock_data: Dict[str, Any] = {}
         self.limits_data: Optional[Dict] = None
         self._session_id: str = ""
+        self.started_by: str = ""  # username of whoever last called /start
 
     def is_running(self) -> bool:
         return bool(self.thread and self.thread.is_alive())
@@ -111,8 +112,16 @@ class _Session:
     def queue_key(self, api_num: int, status: str, detail: str):
         self.key_states[api_num] = {"status": status, "detail": detail}
 
-    def queue_account(self, *args):
-        pass  # accounts saved to disk by append_account() in generator_core
+    def queue_account(self, user, final_pw, old_pw, age, atype, pw_changed, vault_pushed, api_tail):
+        from .generator_core import append_account
+        try:
+            append_account(
+                user, final_pw, old_pw, age, atype, pw_changed, vault_pushed, api_tail,
+                session_id=self._session_id,
+                generated_by=self.started_by,
+            )
+        except Exception:
+            pass  # never let a local-store hiccup interrupt the live worker
 
     def queue_usage(self, key: str, count: int):
         pass  # usage handled by bump_key_usage() in generator_core
@@ -132,12 +141,6 @@ class _Session:
 
 
 _session = _Session()
-
-# Maps a run's session_id -> the username who started it. Lets non-admins see
-# accounts THEY generated (via the existing local append_account/session_id
-# mechanism) without exposing the shared vault to them at all.
-_session_owner_by_id: Dict[str, str] = {}
-_session_owner_lock = threading.Lock()
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -205,8 +208,7 @@ def start_session(config: GeneratorConfig, user=Depends(get_current_user)):
 
     import uuid as _uuid
     _session._session_id = _uuid.uuid4().hex[:12]
-    with _session_owner_lock:
-        _session_owner_by_id[_session._session_id] = str(getattr(user, "username", "")).strip().lower()
+    _session.started_by = str(getattr(user, "username", "")).strip().lower()
     _session.usage = load_usage()
 
     worker = GeneratorWorker(
@@ -327,23 +329,19 @@ def get_config(user=Depends(get_current_user)):
 @router.get("/accounts")
 def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, user=Depends(get_current_user)):
     """Admins: fetch the full vault (source of truth). Non-admins: fetch only
-    accounts they personally generated, from the local store, filtered by
-    which session_id belongs to them — the shared vault is never touched or
-    exposed for a non-admin request."""
+    accounts they personally generated, from the local store — filtered by
+    the generated_by field stored directly on each account record. The
+    shared vault is never touched or exposed for a non-admin request."""
     s = (search or "").strip().lower()
     t = (account_type or "").strip().lower()
     limit = max(1, min(limit, 5000))
 
     if not is_admin(user):
         my_username = str(getattr(user, "username", "")).strip().lower()
-        with _session_owner_lock:
-            my_session_ids = {
-                sid for sid, owner in _session_owner_by_id.items() if owner == my_username
-            }
         accounts = filter_accounts(search=search, account_type=account_type or "")
         mine = [
             a for a in accounts
-            if str(a.get("session_id") or "") in my_session_ids
+            if str(a.get("generated_by") or "").strip().lower() == my_username
         ]
         return [
             {**a, "pass": a.get("pass", ""), "date": _format_vault_date(a.get("date")),
