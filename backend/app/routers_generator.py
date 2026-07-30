@@ -27,6 +27,28 @@ from .generator_core import (
 
 router = APIRouter(prefix="/generator", tags=["generator"])
 
+
+def _format_vault_date(raw) -> str:
+    """Convert whatever date format the vault returns into something readable.
+    Falls back to the raw value if it doesn't parse as a known format."""
+    if not raw:
+        return "—"
+    s = str(raw)
+    from datetime import datetime as _dt
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%d %H:%M:%S"):
+        try:
+            d = _dt.strptime(s, fmt)
+            return d.strftime("%b %d, %Y %H:%M")
+        except ValueError:
+            continue
+    # ISO with variable microsecond precision — try fromisoformat as last resort
+    try:
+        cleaned = s.replace("Z", "+00:00")
+        d = _dt.fromisoformat(cleaned)
+        return d.strftime("%b %d, %Y %H:%M")
+    except Exception:
+        return s
+
 # ── Session state (single shared session, same as desktop) ────────────────────
 
 class _Session:
@@ -293,8 +315,8 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=
                 continue
             accounts.append({
                 "user": user,
-                "pass": pw[:2] + "***" + pw[-2:] if len(pw) > 4 else "***",
-                "date": a.get("date") or a.get("created_at") or "—",
+                "pass": pw,  # full password — private single-user tool, not exposed publicly
+                "date": _format_vault_date(a.get("date") or a.get("created_at") or a.get("createdAt")),
                 "age": a.get("age") or "—",
                 "type": a_type or "—",
                 "pw_changed": bool(a.get("pw_changed") or a.get("password_changed")),
@@ -305,7 +327,7 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=
         # Fallback to local file (only useful if a disk-backed run wrote it)
         accounts = filter_accounts(search=search, account_type=account_type or "")
         return [
-            {**a, "pass": a["pass"][:2] + "***" + a["pass"][-2:] if len(a.get("pass", "")) > 4 else "***"}
+            {**a, "pass": a.get("pass", ""), "date": _format_vault_date(a.get("date"))}
             for a in accounts[:limit]
         ]
 
@@ -363,29 +385,41 @@ def change_unchanged_passwords(_=Depends(get_current_user)):
 
             _session.queue_log(f"=== BULK PASSWORD CHANGE ===", "ok")
             _session.queue_log(f"{len(targets)} unchanged account(s) found", "info")
+            if not targets:
+                _session.queue_log("Nothing to do — every vault account already shows pw_changed=true", "info")
 
-            changed = skipped = 0
+            changed = 0
+            skip_reasons: Dict[str, int] = {}
+
+            def _bump(category: str):
+                skip_reasons[category] = skip_reasons.get(category, 0) + 1
+
             for user, old_pw in targets:
                 if _session._stop.is_set():
                     _session.queue_log("Stopped by user", "warn")
                     break
                 if old_pw == new_password:
                     _session.queue_log(f"Skip {user}: already using target password", "muted")
-                    skipped += 1
+                    _bump("already-target-password")
                     continue
                 try:
                     login_ok, login_result = roblox_login(user, old_pw, ssl_ctx)
                 except Exception as e:
                     login_ok, login_result = False, str(e)
                 if not login_ok:
-                    _session.queue_log(f"Skip {user}: login failed ({login_result})", "warn")
-                    skipped += 1
+                    is_challenge = "challenge" in str(login_result).lower()
+                    if is_challenge:
+                        _session.queue_log(f"Skip {user}: Roblox requires verification from this server (expected on Railway)", "warn")
+                        _bump("roblox-challenge")
+                    else:
+                        _session.queue_log(f"Skip {user}: login failed ({login_result})", "warn")
+                        _bump("login-other")
                     time.sleep(0.5)
                     continue
                 ok, reason = provider_change_password(login_result, old_pw, new_password, ssl_ctx)
                 if not ok:
                     _session.queue_log(f"Skip {user}: PW change failed ({reason})", "warn")
-                    skipped += 1
+                    _bump("pw-change-failed")
                     time.sleep(0.5)
                     continue
                 pushed, detail = v.update_password(user, new_password)
@@ -395,9 +429,21 @@ def change_unchanged_passwords(_=Depends(get_current_user)):
                 else:
                     _session.queue_log(f"Changed {user} but vault update failed ({detail})", "warn")
                     changed += 1
+                    _bump("vault-update-failed-but-pw-changed")
                 time.sleep(0.5)
 
-            _session.queue_log(f"=== DONE — {changed} changed, {skipped} skipped ===", "ok")
+            total_skipped = sum(v for k, v in skip_reasons.items() if k != "vault-update-failed-but-pw-changed")
+            _session.queue_log(f"=== DONE — {changed} changed, {total_skipped} skipped ===", "ok")
+            if skip_reasons:
+                for reason, count in sorted(skip_reasons.items(), key=lambda x: -x[1]):
+                    label = {
+                        "roblox-challenge": "Roblox verification challenge (expected from this server)",
+                        "login-other": "login failed (other reason)",
+                        "pw-change-failed": "password change rejected",
+                        "already-target-password": "already using target password",
+                        "vault-update-failed-but-pw-changed": "password changed but vault write failed",
+                    }.get(reason, reason)
+                    _session.queue_log(f"  {count}× {label}", "muted")
         except Exception as e:
             _session.queue_log(f"Bulk change error: {e}", "error")
         finally:
