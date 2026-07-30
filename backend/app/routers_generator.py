@@ -459,7 +459,7 @@ def change_unchanged_passwords(_=Depends(require_admin)):
                 if not login_ok:
                     result_str = str(login_result).lower()
                     if "no 2captcha key configured" in result_str:
-                        _session.queue_log(f"Skip {user}: 2Captcha key not configured on the server", "error")
+                        _session.queue_log(f"Skip {user}: Roblox wants a captcha here (solving disabled)", "muted")
                         _bump("2captcha-not-configured")
                     elif "captcha solve failed" in result_str:
                         _session.queue_log(f"Skip {user}: 2Captcha could not solve it ({login_result})", "warn")
@@ -493,7 +493,7 @@ def change_unchanged_passwords(_=Depends(require_admin)):
             if skip_reasons:
                 for reason, count in sorted(skip_reasons.items(), key=lambda x: -x[1]):
                     label = {
-                        "2captcha-not-configured": "2Captcha key missing — set TWOCAPTCHA_API_KEY on Railway",
+                        "2captcha-not-configured": "Roblox required a captcha (solving disabled)",
                         "2captcha-solve-failed": "2Captcha couldn't solve the challenge",
                         "roblox-challenge-after-solve": "Roblox rejected it even after a solved captcha",
                         "login-other": "login failed (other reason)",
