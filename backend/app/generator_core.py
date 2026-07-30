@@ -423,6 +423,23 @@ def make_ssl_context(verify: bool) -> ssl.SSLContext:
         return ctx
 
 # ========== HTTP ==========
+PROXY_URL = os.environ.get("ROBLOX_PROXY_URL", "").strip()
+_proxy_opener: Optional["urllib.request.OpenerDirector"] = None
+_proxy_opener_lock = threading.Lock()
+
+def _get_proxy_opener():
+    """Build (once) and cache a urllib opener routed through the residential
+    proxy. Only used for Roblox auth calls — Bloxgen and vault traffic stay
+    direct since only Roblox's login endpoint challenges datacenter IPs."""
+    global _proxy_opener
+    if _proxy_opener is not None:
+        return _proxy_opener
+    with _proxy_opener_lock:
+        if _proxy_opener is None:
+            handler = urllib.request.ProxyHandler({"http": PROXY_URL, "https": PROXY_URL})
+            _proxy_opener = urllib.request.build_opener(handler)
+    return _proxy_opener
+
 def _http(
     method: str,
     url: str,
@@ -430,6 +447,7 @@ def _http(
     body: Any = None,
     ssl_ctx: Optional[ssl.SSLContext] = None,
     timeout: float = 30.0,
+    use_proxy: bool = False,
 ) -> Tuple[int, Any, Dict[str, str]]:
     hdrs = {"User-Agent": UA, "Connection": "keep-alive"}
     if headers:
@@ -448,6 +466,17 @@ def _http(
             hdrs.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method.upper())
     try:
+        if use_proxy and PROXY_URL:
+            opener = _get_proxy_opener()
+            with opener.open(req, timeout=timeout) as resp:
+                raw = resp.read()
+                text = raw.decode("utf-8", errors="replace")
+                out_headers = {k.lower(): v for k, v in resp.getheaders()}
+                try:
+                    parsed = json.loads(text) if text else None
+                except json.JSONDecodeError:
+                    parsed = text
+                return resp.status, parsed, out_headers
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
             raw = resp.read()
             text = raw.decode("utf-8", errors="replace")
@@ -783,7 +812,7 @@ def roblox_login(
     try:
         _, __, hdrs = _http("POST", login_url,
                             headers={"Content-Type": "application/json"},
-                            body={}, ssl_ctx=ssl_ctx, timeout=timeout)
+                            body={}, ssl_ctx=ssl_ctx, timeout=timeout, use_proxy=True)
         csrf = hdrs.get("x-csrf-token", "")
     except Exception as e:
         return False, f"csrf-fetch: {e}"
@@ -807,7 +836,9 @@ def roblox_login(
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
+        opener = _get_proxy_opener() if PROXY_URL else None
+        opened = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
+        with opened as resp:
             # getheaders() returns ALL headers including multiple Set-Cookie entries
             all_headers = resp.getheaders()
             for hdr_name, hdr_val in all_headers:
@@ -863,7 +894,9 @@ def provider_change_password(
             hdrs["X-CSRF-TOKEN"] = csrf
         req = urllib.request.Request(url, data=body_json, headers=hdrs, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
+            opener = _get_proxy_opener() if PROXY_URL else None
+            opened = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
+            with opened as resp:
                 return (True, "" if resp.status in (200, 204) else f"http-{resp.status}", None)
         except urllib.error.HTTPError as e:
             # Extract CSRF token from 403 response headers
