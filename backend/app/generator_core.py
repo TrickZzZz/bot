@@ -2,25 +2,11 @@ from __future__ import annotations
 """generator_core.py — DeltaCore engine for Railway. No UI deps."""
 import os
 import logging
+
 logger = logging.getLogger("generator_core")
-def _flog(msg):logger.debug(str(msg))
 
-TYPE_META: Dict[str, Tuple[float, int]] = {
-    "+30 days old": (30.0, 30),
-    "+1 year old": (600.0, 15),
-    "5+ years old": (1800.0, 10),
-    "dump": (2700.0, 5),
-}
-ACCOUNT_TYPES = list(TYPE_META.keys())
-
-def _get_keys(cfg_keys: list) -> List[str]:
-    """Return configured keys, or DEFAULT if empty/placeholder only."""
-    keys = [str(k).strip() for k in (cfg_keys or []) if str(k).strip()]
-    keys = [k for k in keys if k and k != "YOUR_BLOXGEN_KEY_HERE"]
-    if keys:
-        return keys
-    return [str(k).strip() for k in DEFAULT_CONFIG.get("bloxgen_keys") or [] if str(k).strip()]
-
+def _flog(msg: str) -> None:
+    logger.debug(str(msg))
 
 r"""
 DeltaCore Alt Generator - personal panel
@@ -36,6 +22,7 @@ DeltaCore Alt Generator - personal panel
 Run:      python DeltaCore_Alt_Generator_Personal.py
 """
 
+from __future__ import annotations
 
 import json
 import os
@@ -58,6 +45,71 @@ from copy import copy as _copy
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 
+def _run_nowin(args, **kwargs):
+    """Run a subprocess without spawning a console window on Windows."""
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        kwargs.setdefault("startupinfo", si)
+        kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+    return subprocess.run(args, **kwargs)
+
+# ========== in-memory store (no disk files) ==========
+APP_DIR = Path(__file__).resolve().parent
+CONFIG_VERSION = 2
+
+_lock_config = threading.Lock()
+_lock_usage = threading.Lock()
+_lock_accounts = threading.Lock()
+
+# live state held only in RAM for this run
+_MEM_CONFIG: Dict[str, Any] = {}
+_MEM_USAGE: Dict[str, Any] = {}
+_MEM_ACCOUNTS: List[Dict[str, Any]] = []
+_ACCOUNT_USERS: Set[str] = set()
+_USAGE_PATH    = Path.home() / ".deltacore_usage.json"
+_ACCOUNTS_PATH = Path.home() / ".deltacore_accounts.json"
+
+# type -> (cooldown_sec, daily_limit_per_key)
+TYPE_META: Dict[str, Tuple[float, int]] = {
+    "+30 days old": (30.0, 30),
+    "+1 year old": (600.0, 15),
+    "5+ years old": (1800.0, 10),
+    "dump": (2700.0, 5),
+}
+ACCOUNT_TYPES = list(TYPE_META.keys())
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "config_version": CONFIG_VERSION,
+    "bloxgen_keys": [
+        "BLOX-Z8M9R1XA6EZDD1B9",
+        "BLOX-ESKBR5QF6W1VSQYH",
+        "BLOX-BVFCF7XVRXI0VMK2",
+        "BLOX-20FIDYUWMQHMRGWB",
+        "BLOX-L6KHNWRTTSULP8FS",
+        "BLOX-BYTINVTIEFDHNTC3",
+        "BLOX-PCTXK5UCTB7DLTQW",
+    ],
+    "account_type": "+30 days old",
+    "new_password": "",
+    "vault_enabled": True,
+    "vault_api": "https://bot-production-7427.up.railway.app",
+    "vault_user": "Trickzz",
+    "vault_pass": "acc-gen123",
+    "ssl_verify": True,
+    "target_count": 0,
+}
+
+def _get_keys(cfg_keys: list) -> List[str]:
+    """Return configured keys, or DEFAULT if empty/placeholder only."""
+    keys = [str(k).strip() for k in (cfg_keys or []) if str(k).strip()]
+    keys = [k for k in keys if k and k != "YOUR_BLOXGEN_KEY_HERE"]
+    if keys:
+        return keys
+    return [str(k).strip() for k in DEFAULT_CONFIG.get("bloxgen_keys") or [] if str(k).strip()]
+
+# ========== config (RAM only — never writes JSON files) ==========
 def load_config() -> Dict[str, Any]:
     with _lock_config:
         if not _MEM_CONFIG:
