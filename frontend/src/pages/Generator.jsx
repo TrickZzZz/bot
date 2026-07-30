@@ -3,10 +3,27 @@ import * as React from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Card, CardContent } from "@/components/ui/card"
-import { Zap, RotateCcw, Square, BarChart2, Settings } from "lucide-react"
+import {
+  Zap, Play, Square, BarChart3, Search, Trash2, RotateCcw,
+  Clock, KeyRound, CheckCircle2, XCircle, AlertCircle, Circle,
+  ShieldCheck, Settings2, Users,
+} from "lucide-react"
 
-var LEVEL_COLOR = {ok:"#3fb950",error:"#f85149",warn:"#d29922",muted:"#6b7280",info:"#94a3b8"}
-var KEY_COLOR = {ready:"#3fb950",busy:"#d29922",ok:"#3fb950",warn:"#d29922",error:"#f85149",dead:"#f85149"}
+var STATUS_COLOR = {
+  ready:  {dot:"bg-emerald-400",  text:"text-emerald-400",  bg:"bg-emerald-500/10",  ring:"ring-emerald-500/20"},
+  ok:     {dot:"bg-emerald-400",  text:"text-emerald-400",  bg:"bg-emerald-500/10",  ring:"ring-emerald-500/20"},
+  busy:   {dot:"bg-amber-400",    text:"text-amber-400",    bg:"bg-amber-500/10",    ring:"ring-amber-500/20"},
+  warn:   {dot:"bg-amber-400",    text:"text-amber-400",    bg:"bg-amber-500/10",    ring:"ring-amber-500/20"},
+  error:  {dot:"bg-rose-400",     text:"text-rose-400",     bg:"bg-rose-500/10",     ring:"ring-rose-500/20"},
+  dead:   {dot:"bg-rose-400",     text:"text-rose-400",     bg:"bg-rose-500/10",     ring:"ring-rose-500/20"},
+}
+var LEVEL_STYLE = {
+  ok:    {bar:"bg-emerald-400", text:"text-emerald-300"},
+  error: {bar:"bg-rose-400",    text:"text-rose-300"},
+  warn:  {bar:"bg-amber-400",   text:"text-amber-300"},
+  muted: {bar:"bg-zinc-600",    text:"text-zinc-500"},
+  info:  {bar:"bg-sky-400",     text:"text-sky-300/90"},
+}
 var TYPES = ["+30 days old","+1 year old","5+ years old","dump"]
 var API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000"
 
@@ -31,10 +48,83 @@ function getHiddenSet() {
     return raw ? new Set(JSON.parse(raw)) : new Set()
   } catch (e) { return new Set() }
 }
-
 function setHiddenSet(set) {
   try { localStorage.setItem(HIDDEN_KEY, JSON.stringify(Array.from(set))) } catch (e) {}
 }
+
+function formatResetTime(iso) {
+  try {
+    var d = new Date(iso)
+    if (isNaN(d.getTime())) return iso
+    var now = new Date()
+    var diffMs = d.getTime() - now.getTime()
+    if (diffMs < 0) return "now"
+    var hrs = Math.floor(diffMs / 3600000)
+    var mins = Math.floor((diffMs % 3600000) / 60000)
+    var localStr = d.toLocaleString(undefined, {month:"short", day:"numeric", hour:"numeric", minute:"2-digit"})
+    return localStr + " · in " + hrs + "h " + mins + "m"
+  } catch (e) { return iso }
+}
+
+function formatElapsed(sec) {
+  var h = Math.floor(sec / 3600)
+  var m = Math.floor((sec % 3600) / 60)
+  var s = Math.floor(sec % 60)
+  function pad(n) { return n < 10 ? "0" + n : "" + n }
+  return pad(h) + ":" + pad(m) + ":" + pad(s)
+}
+
+// ── small presentational pieces ────────────────────────────────────────────
+
+function StatusPill(props) {
+  var running = props.running
+  return React.createElement("div", {
+    className: "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium " +
+      (running ? "bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/20" : "bg-secondary text-muted-foreground")
+  },
+    React.createElement("span", {className: "relative flex h-1.5 w-1.5"},
+      running && React.createElement("span", {className: "animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"}),
+      React.createElement("span", {className: "relative inline-flex rounded-full h-1.5 w-1.5 " + (running ? "bg-emerald-400" : "bg-muted-foreground")})
+    ),
+    running ? "Running" : "Idle"
+  )
+}
+
+function StatCard(props) {
+  return React.createElement(Card, {className: "relative overflow-hidden"},
+    React.createElement("div", {className: "absolute left-0 top-0 bottom-0 w-1 " + props.barColor}),
+    React.createElement(CardContent, {className: "pt-4 pb-4 pl-5"},
+      React.createElement("div", {className: "flex items-center gap-2 text-muted-foreground text-xs font-medium mb-1"},
+        React.createElement(props.icon, {className: "h-3.5 w-3.5"}),
+        props.label
+      ),
+      React.createElement("div", {className: "text-2xl font-bold tabular-nums " + props.valueColor}, props.value)
+    )
+  )
+}
+
+function KeyChip(props) {
+  var c = STATUS_COLOR[props.status] || {dot:"bg-zinc-500", text:"text-muted-foreground", bg:"bg-secondary", ring:"ring-border"}
+  return React.createElement("div", {
+    className: "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ring-1 shrink-0 " + c.bg + " " + c.ring
+  },
+    React.createElement("span", {className: "relative flex h-1.5 w-1.5"},
+      props.status === "busy" && React.createElement("span", {className: "animate-ping absolute inline-flex h-full w-full rounded-full " + c.dot + " opacity-75"}),
+      React.createElement("span", {className: "relative inline-flex rounded-full h-1.5 w-1.5 " + c.dot})
+    ),
+    React.createElement("span", {className: "text-foreground/80"}, "API" + props.num),
+    React.createElement("span", {className: c.text}, props.status)
+  )
+}
+
+function SectionLabel(props) {
+  return React.createElement("div", {className: "flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground mb-3 mt-6 first:mt-0"},
+    React.createElement(props.icon, {className: "h-3.5 w-3.5"}),
+    props.children
+  )
+}
+
+// ── main component ──────────────────────────────────────────────────────────
 
 export default function Generator() {
   var statusState = React.useState(null); var status = statusState[0]; var setStatus = statusState[1]
@@ -47,8 +137,12 @@ export default function Generator() {
   var dirtyState = React.useState(false); var dirty = dirtyState[0]; var setDirty = dirtyState[1]
   var savingState = React.useState(false); var saving = savingState[0]; var setSaving = savingState[1]
   var msgState = React.useState(""); var msg = msgState[0]; var setMsg = msgState[1]
+  var elapsedState = React.useState(0); var elapsed = elapsedState[0]; var setElapsed = elapsedState[1]
+  var streamingState = React.useState(false); var streaming = streamingState[0]; var setStreaming = streamingState[1]
   var feedRef = React.useRef(null)
   var esRef = React.useRef(null)
+  var runStartRef = React.useRef(null)
+  var wasRunningRef = React.useRef(false)
 
   React.useEffect(function() {
     gapi("/config").then(setCfg).catch(function() {
@@ -61,6 +155,20 @@ export default function Generator() {
     var tl = setInterval(pollLimits, 120000)
     return function() { clearInterval(t); clearInterval(tl); if (esRef.current) esRef.current.close() }
   }, [])
+
+  // elapsed timer — starts counting when the backend reports running, stops when it doesn't
+  React.useEffect(function() {
+    var running = !!(status && status.running)
+    if (running && !wasRunningRef.current) {
+      runStartRef.current = Date.now()
+    }
+    wasRunningRef.current = running
+    if (!running) return
+    var iv = setInterval(function() {
+      setElapsed(Math.floor((Date.now() - runStartRef.current) / 1000))
+    }, 1000)
+    return function() { clearInterval(iv) }
+  }, [status && status.running])
 
   React.useEffect(function() {
     if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight
@@ -75,18 +183,19 @@ export default function Generator() {
     var token = localStorage.getItem("am_access_token")
     var es = new EventSource(API_BASE + "/generator/stream?token=" + encodeURIComponent(token || ""))
     esRef.current = es
+    setStreaming(true)
     es.onmessage = function(e) {
       var d = JSON.parse(e.data)
-      if (d.done) { es.close(); return }
+      if (d.done) { setStreaming(false); es.close(); return }
       if (d.heartbeat) return
       setLogs(function(prev) { return prev.slice(-499).concat([d]) })
     }
-    es.onerror = function() { es.close() }
+    es.onerror = function() { setStreaming(false); es.close() }
   }
 
   function handleStart() {
     if (!cfg) { alert("Config not loaded yet"); return }
-    setLogs([])
+    setLogs([]); setElapsed(0)
     gapi("/start", "POST", cfg).then(startStream).catch(function(e) { alert(e.message) })
   }
 
@@ -95,7 +204,7 @@ export default function Generator() {
   }
 
   function handleStats() {
-    setLogs([])
+    setLogs([]); setElapsed(0)
     gapi("/dry-run", "POST").then(startStream).catch(function(e) { alert(e.message) })
     gapi("/limits").then(setLimits).catch(function(){})
   }
@@ -103,7 +212,7 @@ export default function Generator() {
   function handleSave() {
     setSaving(true)
     gapi("/config", "POST", cfg).then(function() {
-      setDirty(false); setMsg("Saved ✓"); setSaving(false)
+      setDirty(false); setMsg("Saved"); setSaving(false)
       setTimeout(function() { setMsg("") }, 2000)
     }).catch(function(e) { alert(e.message); setSaving(false) })
   }
@@ -140,194 +249,285 @@ export default function Generator() {
   var empty = status ? status.stock_empty : 0
   var fails = status ? status.fails : 0
   var keyStates = status ? (status.key_states || {}) : {}
-  var keyCount = cfg && cfg.bloxgen_keys ? cfg.bloxgen_keys.length : 7
+  var keyCount = cfg && cfg.bloxgen_keys && cfg.bloxgen_keys.length ? cfg.bloxgen_keys.length : 7
+  var hasHidden = getHiddenSet().size > 0
 
-  // ── Render ──────────────────────────────────────────────────────────────────
   var tabs = [
-    {id:"feed", label:"Live Feed"},
-    {id:"accounts", label:"Accounts"},
-    {id:"limits", label:"Limits"},
-    {id:"config", label:"Config"},
+    {id:"feed", label:"Live Feed", icon: Circle},
+    {id:"accounts", label:"Accounts", icon: Users},
+    {id:"limits", label:"Limits", icon: BarChart3},
+    {id:"config", label:"Config", icon: Settings2},
   ]
 
-  return React.createElement("div", {className:"space-y-6"},
-    // Page header — matches accounts page style
-    React.createElement("div", {className:"flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between"},
+  // key chips: use live key_states if we have them, otherwise show placeholders sized to configured key count
+  var keyChips = Object.keys(keyStates).length > 0
+    ? Object.keys(keyStates).sort(function(a,b){return Number(a)-Number(b)}).map(function(n) {
+        return React.createElement(KeyChip, {key:n, num:n, status:keyStates[n].status})
+      })
+    : Array.from({length: keyCount}, function(_, i) {
+        return React.createElement(KeyChip, {key:i, num:i+1, status:"ready"})
+      })
+
+  return React.createElement("div", {className:"space-y-5"},
+
+    // ── Header ──────────────────────────────────────────────────────────────
+    React.createElement("div", {className:"flex flex-col sm:flex-row gap-4 sm:items-center sm:justify-between"},
       React.createElement("div", {className:"flex items-center gap-3"},
-        React.createElement("div", {className:"h-9 w-9 rounded-lg bg-primary/15 flex items-center justify-center ring-1 ring-primary/25"},
+        React.createElement("div", {className:"h-10 w-10 rounded-xl bg-primary/15 flex items-center justify-center ring-1 ring-primary/25"},
           React.createElement(Zap, {className:"h-5 w-5 text-primary"})
         ),
         React.createElement("div", null,
-          React.createElement("h2", {className:"font-semibold text-lg leading-tight"}, "Alt Generator V1"),
-          React.createElement("p", {className:"text-xs text-muted-foreground"},
-            running ? "● running — done: " + done : "● idle"
+          React.createElement("div", {className:"flex items-center gap-2.5"},
+            React.createElement("h2", {className:"font-semibold text-lg leading-tight"}, "Alt Generator V1"),
+            React.createElement(StatusPill, {running: running})
+          ),
+          React.createElement("p", {className:"text-xs text-muted-foreground mt-0.5"},
+            cfg ? cfg.account_type : "loading…"
           )
         )
       ),
-      // Control buttons
-      React.createElement("div", {className:"flex gap-2 flex-wrap"},
-        React.createElement(Button, {size:"sm", disabled:running, onClick:handleStart, className:"bg-green-600 hover:bg-green-700 text-white"}, "Start"),
-        React.createElement(Button, {size:"sm", variant:"destructive", disabled:!running, onClick:handleStop}, "Stop"),
-        React.createElement(Button, {size:"sm", variant:"outline", disabled:running, onClick:handleStats}, "Stats"),
+      React.createElement("div", {className:"flex gap-2"},
+        React.createElement(Button, {
+          disabled: running, onClick: handleStart,
+          className: "bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5"
+        }, React.createElement(Play, {className:"h-3.5 w-3.5"}), "Start"),
+        React.createElement(Button, {
+          variant:"destructive", disabled:!running, onClick:handleStop, className:"gap-1.5"
+        }, React.createElement(Square, {className:"h-3.5 w-3.5"}), "Stop"),
+        React.createElement(Button, {
+          variant:"outline", disabled:running, onClick:handleStats, className:"gap-1.5"
+        }, React.createElement(BarChart3, {className:"h-3.5 w-3.5"}), "Stats"),
       )
     ),
 
-    // Stats row
-    React.createElement("div", {className:"grid grid-cols-3 gap-3"},
-      React.createElement(Card, null,
-        React.createElement(CardContent, {className:"pt-4 pb-4 text-center"},
-          React.createElement("div", {className:"text-2xl font-bold text-green-400"}, done),
-          React.createElement("div", {className:"text-xs text-muted-foreground mt-1"}, "DONE")
-        )
-      ),
-      React.createElement(Card, null,
-        React.createElement(CardContent, {className:"pt-4 pb-4 text-center"},
-          React.createElement("div", {className:"text-2xl font-bold text-yellow-400"}, empty),
-          React.createElement("div", {className:"text-xs text-muted-foreground mt-1"}, "EMPTY")
-        )
-      ),
-      React.createElement(Card, null,
-        React.createElement(CardContent, {className:"pt-4 pb-4 text-center"},
-          React.createElement("div", {className:"text-2xl font-bold text-red-400"}, fails),
-          React.createElement("div", {className:"text-xs text-muted-foreground mt-1"}, "FAILS")
-        )
+    // ── Key health strip ──────────────────────────────────────────────────
+    React.createElement(Card, null,
+      React.createElement(CardContent, {className:"py-3 px-4"},
+        React.createElement("div", {className:"flex items-center gap-2 mb-2.5 text-xs font-medium text-muted-foreground"},
+          React.createElement(KeyRound, {className:"h-3.5 w-3.5"}),
+          keyCount + " API " + (keyCount === 1 ? "key" : "keys")
+        ),
+        React.createElement("div", {className:"flex flex-wrap gap-1.5"}, keyChips)
       )
     ),
 
-    // Tab nav
-    React.createElement("div", {className:"flex gap-1 border-b border-border pb-0"},
+    // ── Stat cards ─────────────────────────────────────────────────────────
+    React.createElement("div", {className:"grid grid-cols-2 sm:grid-cols-4 gap-3"},
+      React.createElement(StatCard, {icon:CheckCircle2, label:"Done", value:done, barColor:"bg-emerald-400", valueColor:"text-emerald-400"}),
+      React.createElement(StatCard, {icon:AlertCircle, label:"Empty", value:empty, barColor:"bg-amber-400", valueColor:"text-amber-400"}),
+      React.createElement(StatCard, {icon:XCircle, label:"Fails", value:fails, barColor:"bg-rose-400", valueColor:"text-rose-400"}),
+      React.createElement(StatCard, {icon:Clock, label:"Elapsed", value:formatElapsed(elapsed), barColor:"bg-sky-400", valueColor:"text-sky-400"})
+    ),
+
+    // ── Tabs ───────────────────────────────────────────────────────────────
+    React.createElement("div", {className:"flex gap-1 border-b border-border"},
       tabs.map(function(t) {
+        var active = tab === t.id
         return React.createElement("button", {
           key: t.id,
           onClick: function() { setTab(t.id) },
-          className: "px-4 py-2 text-sm font-medium border-b-2 transition-colors " + (tab === t.id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")
-        }, t.label)
+          className: "flex items-center gap-1.5 px-3.5 py-2 text-sm font-medium border-b-2 transition-colors -mb-px " +
+            (active ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground")
+        },
+          React.createElement(t.icon, {className:"h-3.5 w-3.5"}),
+          t.label
+        )
       })
     ),
 
-    // Tab content
+    // ── FEED ─────────────────────────────────────────────────────────────
     tab === "feed" && React.createElement(Card, null,
       React.createElement(CardContent, {className:"p-0"},
-        React.createElement("div", {className:"flex items-center justify-between px-4 py-2 border-b border-border"},
-          React.createElement("span", {className:"text-xs text-muted-foreground font-medium tracking-wider"}, "LIVE FEED"),
-          React.createElement(Button, {size:"sm", variant:"ghost", onClick:function(){setLogs([])}}, "Clear")
+        React.createElement("div", {className:"flex items-center justify-between px-4 py-2.5 border-b border-border"},
+          React.createElement("div", {className:"flex items-center gap-2"},
+            React.createElement("span", {className:"h-1.5 w-1.5 rounded-full " + (streaming ? "bg-emerald-400 animate-pulse" : "bg-zinc-600")}),
+            React.createElement("span", {className:"text-xs text-muted-foreground font-medium tracking-wide"}, "LIVE FEED")
+          ),
+          React.createElement(Button, {size:"sm", variant:"ghost", onClick:function(){setLogs([])}, className:"h-7 gap-1.5 text-xs"},
+            React.createElement(Trash2, {className:"h-3 w-3"}), "Clear"
+          )
         ),
         React.createElement("div", {
           ref: feedRef,
-          style: {height:400, overflowY:"auto", padding:"12px 16px", fontFamily:"ui-monospace,monospace", fontSize:12, lineHeight:1.7}
+          className: "bg-black/20",
+          style: {height:420, overflowY:"auto", padding:"10px 0", fontFamily:"ui-monospace,SFMono-Regular,Menlo,monospace", fontSize:12.5, lineHeight:1.8}
         },
-          logs.length === 0 && React.createElement("p", {className:"text-muted-foreground text-sm"}, "Press Start or Stats to begin..."),
+          logs.length === 0 && React.createElement("div", {className:"px-4 py-8 text-center"},
+            React.createElement("p", {className:"text-muted-foreground text-sm"}, "Nothing here yet."),
+            React.createElement("p", {className:"text-muted-foreground/60 text-xs mt-1"}, "Press Start to run the generator, or Stats to check keys and stock.")
+          ),
           logs.map(function(line, i) {
-            return React.createElement("div", {key:i, style:{color:LEVEL_COLOR[line.level]||"#94a3b8", marginBottom:1, whiteSpace:"pre-wrap", wordBreak:"break-all"}}, line.msg)
+            var st = LEVEL_STYLE[line.level] || LEVEL_STYLE.info
+            return React.createElement("div", {key:i, className:"flex px-4 hover:bg-white/[0.02]"},
+              React.createElement("span", {className:"w-0.5 shrink-0 rounded-full mr-2.5 " + st.bar}),
+              React.createElement("span", {className: st.text + " whitespace-pre-wrap break-all"}, line.msg)
+            )
           })
         )
       )
     ),
 
+    // ── ACCOUNTS ─────────────────────────────────────────────────────────
     tab === "accounts" && React.createElement(Card, null,
       React.createElement(CardContent, {className:"p-4 space-y-3"},
         React.createElement("div", {className:"flex gap-2 flex-wrap items-center"},
-          React.createElement(Input, {value:search, onChange:function(e){setSearch(e.target.value)}, placeholder:"Search accounts...", className:"flex-1 min-w-[180px]"}),
-          React.createElement(Button, {size:"sm", variant:"outline", onClick:clearAccountsList}, "Clear list"),
-          React.createElement(Button, {size:"sm", variant:"ghost", onClick:showAllAccounts}, "Show all"),
-          React.createElement("span", {className:"text-sm text-muted-foreground self-center whitespace-nowrap"}, accounts.length + " accounts")
-        ),
-        React.createElement("div", {style:{overflowX:"auto"}},
-          React.createElement("table", {className:"w-full text-sm"},
-            React.createElement("thead", null,
-              React.createElement("tr", {className:"border-b border-border text-left text-muted-foreground"},
-                ["User","Pass","Date","Age","Type","PW?","Vault?"].map(function(h) {
-                  return React.createElement("th", {key:h, className:"font-medium px-3 py-2"}, h)
-                })
-              )
-            ),
-            React.createElement("tbody", null,
-              accounts.map(function(a, i) {
-                return React.createElement("tr", {key:i, className:"border-b border-border/60 last:border-0 hover:bg-secondary/30 transition-colors"},
-                  React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, a.user),
-                  React.createElement("td", {className:"px-3 py-2 font-mono text-muted-foreground"}, a.pass),
-                  React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, a.date),
-                  React.createElement("td", {className:"px-3 py-2"}, a.age),
-                  React.createElement("td", {className:"px-3 py-2"}, a.type),
-                  React.createElement("td", {className:"px-3 py-2", style:{color:a.pw_changed?"#3fb950":"#6b7280"}}, a.pw_changed?"✓":"—"),
-                  React.createElement("td", {className:"px-3 py-2", style:{color:a.vault_pushed?"#3fb950":"#6b7280"}}, a.vault_pushed?"✓":"—")
-                )
-              })
-            )
+          React.createElement("div", {className:"relative flex-1 min-w-[180px]"},
+            React.createElement(Search, {className:"absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground"}),
+            React.createElement(Input, {value:search, onChange:function(e){setSearch(e.target.value)}, placeholder:"Search accounts...", className:"pl-8"})
+          ),
+          React.createElement(Button, {size:"sm", variant:"outline", onClick:clearAccountsList, className:"gap-1.5"},
+            React.createElement(Trash2, {className:"h-3.5 w-3.5"}), "Clear list"
+          ),
+          hasHidden && React.createElement(Button, {size:"sm", variant:"ghost", onClick:showAllAccounts, className:"gap-1.5"},
+            React.createElement(RotateCcw, {className:"h-3.5 w-3.5"}), "Show all"
+          ),
+          React.createElement("div", {className:"flex items-center gap-1.5 text-xs text-muted-foreground whitespace-nowrap ml-auto"},
+            hasHidden && React.createElement("span", {className:"px-1.5 py-0.5 rounded bg-secondary text-[10px] font-medium"}, "filtered"),
+            accounts.length + " accounts"
           )
-        )
-      )
-    ),
-
-    tab === "limits" && React.createElement(Card, null,
-      React.createElement(CardContent, {className:"p-4"},
-        !limits
-          ? React.createElement("p", {className:"text-sm text-muted-foreground"}, "Loading stock status...")
-          : React.createElement(React.Fragment, null,
-              limits.stock_error && React.createElement("p", {className:"text-sm text-red-400 mb-3"}, "Stock check failed: " + limits.stock_error),
+        ),
+        accounts.length === 0
+          ? React.createElement("div", {className:"py-10 text-center"},
+              React.createElement(Users, {className:"h-8 w-8 mx-auto text-muted-foreground/40 mb-2"}),
+              React.createElement("p", {className:"text-sm text-muted-foreground"},
+                hasHidden ? "No new accounts yet — generate some or press Show all." : "No accounts match your search.")
+            )
+          : React.createElement("div", {style:{overflowX:"auto"}},
               React.createElement("table", {className:"w-full text-sm"},
                 React.createElement("thead", null,
                   React.createElement("tr", {className:"border-b border-border text-left text-muted-foreground"},
-                    ["Type","Remaining","Used / Limit","Status"].map(function(h) {
-                      return React.createElement("th", {key:h, className:"font-medium px-3 py-2"}, h)
+                    ["User","Pass","Date","Age","Type","PW?","Vault?"].map(function(h) {
+                      return React.createElement("th", {key:h, className:"font-medium px-3 py-2 text-xs uppercase tracking-wide"}, h)
                     })
                   )
                 ),
                 React.createElement("tbody", null,
-                  (limits.types || TYPES).map(function(t) {
-                    var s = limits.stock && limits.stock[t]
-                    var q = limits.quota && limits.quota[t]
-                    var has = s ? s.available : null
-                    var statusEl = has === null
-                      ? React.createElement("span", {className:"text-muted-foreground"}, "N/A")
-                      : has
-                        ? React.createElement("span", {className:"text-green-400"}, "in stock")
-                        : React.createElement("span", {className:"text-red-400"}, "no stock")
-                    var typeName = t ? String(t) : "—"
-                    var remaining = q ? q.remainingGenerations : null
-                    var remainingEl = remaining === null
-                      ? React.createElement("span", {className:"text-muted-foreground"}, "—")
-                      : React.createElement("span", {className: remaining > 0 ? "text-green-400" : "text-red-400"}, String(remaining))
-                    var usedLimit = q ? (q.generationsToday + " / " + q.dailyLimit) : "—"
-                    return React.createElement("tr", {key:typeName, className:"border-b border-border/60 last:border-0"},
-                      React.createElement("td", {className:"px-3 py-2 font-medium"}, typeName),
-                      React.createElement("td", {className:"px-3 py-2"}, remainingEl),
-                      React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, usedLimit),
-                      React.createElement("td", {className:"px-3 py-2"}, statusEl)
+                  accounts.map(function(a, i) {
+                    return React.createElement("tr", {key:i, className:"border-b border-border/60 last:border-0 hover:bg-secondary/30 transition-colors"},
+                      React.createElement("td", {className:"px-3 py-2 text-foreground/90"}, a.user),
+                      React.createElement("td", {className:"px-3 py-2 font-mono text-xs text-muted-foreground"}, a.pass),
+                      React.createElement("td", {className:"px-3 py-2 text-muted-foreground text-xs"}, a.date),
+                      React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, a.age),
+                      React.createElement("td", {className:"px-3 py-2"},
+                        a.type && a.type !== "—"
+                          ? React.createElement("span", {className:"text-xs px-1.5 py-0.5 rounded bg-secondary text-foreground/70"}, a.type)
+                          : React.createElement("span", {className:"text-muted-foreground"}, "—")
+                      ),
+                      React.createElement("td", {className:"px-3 py-2"},
+                        a.pw_changed
+                          ? React.createElement(CheckCircle2, {className:"h-3.5 w-3.5 text-emerald-400"})
+                          : React.createElement("span", {className:"text-muted-foreground"}, "—")
+                      ),
+                      React.createElement("td", {className:"px-3 py-2"},
+                        a.vault_pushed
+                          ? React.createElement(CheckCircle2, {className:"h-3.5 w-3.5 text-emerald-400"})
+                          : React.createElement("span", {className:"text-muted-foreground"}, "—")
+                      )
                     )
                   })
                 )
-              ),
-              limits.reset_time && React.createElement("p", {className:"text-xs text-muted-foreground mt-3"}, "Resets: " + limits.reset_time)
+              )
             )
       )
     ),
 
-    tab === "config" && React.createElement(Card, null,
+    // ── LIMITS ───────────────────────────────────────────────────────────
+    tab === "limits" && React.createElement(Card, null,
       React.createElement(CardContent, {className:"p-4"},
+        !limits
+          ? React.createElement("div", {className:"py-8 text-center text-sm text-muted-foreground"}, "Loading stock status…")
+          : React.createElement(React.Fragment, null,
+              limits.stock_error && React.createElement("div", {className:"flex items-center gap-2 text-sm text-rose-400 mb-3 bg-rose-500/10 rounded-md px-3 py-2"},
+                React.createElement(AlertCircle, {className:"h-4 w-4 shrink-0"}),
+                "Stock check failed: " + limits.stock_error
+              ),
+              React.createElement("div", {className:"space-y-2"},
+                (limits.types || TYPES).map(function(t) {
+                  var s = limits.stock && limits.stock[t]
+                  var q = limits.quota && limits.quota[t]
+                  var has = s ? s.available : null
+                  var remaining = q ? q.remainingGenerations : null
+                  var dailyLimit = q ? q.dailyLimit : 0
+                  var pct = (remaining !== null && dailyLimit > 0) ? Math.round((remaining / dailyLimit) * 100) : null
+                  var barColor = remaining === null ? "bg-zinc-700" : remaining > 0 ? "bg-emerald-400" : "bg-rose-400"
+                  return React.createElement("div", {key:t, className:"rounded-lg border border-border p-3"},
+                    React.createElement("div", {className:"flex items-center justify-between mb-2"},
+                      React.createElement("span", {className:"text-sm font-medium"}, t),
+                      React.createElement("span", {
+                        className: "text-xs px-2 py-0.5 rounded-full font-medium " +
+                          (has === null ? "bg-secondary text-muted-foreground" : has ? "bg-emerald-500/10 text-emerald-400" : "bg-rose-500/10 text-rose-400")
+                      }, has === null ? "N/A" : has ? "in stock" : "no stock")
+                    ),
+                    React.createElement("div", {className:"flex items-center gap-3"},
+                      React.createElement("div", {className:"flex-1 h-1.5 rounded-full bg-secondary overflow-hidden"},
+                        pct !== null && React.createElement("div", {className:"h-full rounded-full " + barColor, style:{width: Math.max(pct,3) + "%"}})
+                      ),
+                      React.createElement("span", {className:"text-xs text-muted-foreground tabular-nums whitespace-nowrap"},
+                        remaining === null ? "—" : (remaining + " left · " + q.generationsToday + "/" + q.dailyLimit + " used")
+                      )
+                    )
+                  )
+                })
+              ),
+              limits.reset_time && React.createElement("p", {className:"text-xs text-muted-foreground mt-4 flex items-center gap-1.5"},
+                React.createElement(Clock, {className:"h-3 w-3"}),
+                "Resets " + formatResetTime(limits.reset_time)
+              )
+            )
+      )
+    ),
+
+    // ── CONFIG ───────────────────────────────────────────────────────────
+    tab === "config" && React.createElement(Card, null,
+      React.createElement(CardContent, {className:"p-5"},
         !cfg
-          ? React.createElement("p", {className:"text-sm text-muted-foreground"}, "Loading config...")
-          : React.createElement("div", {className:"space-y-4 max-w-lg"},
-              React.createElement("div", {className:"space-y-1"},
-                React.createElement("label", {className:"text-sm font-medium"}, "Account type"),
-                React.createElement("select", {
-                  value: cfg.account_type || "+30 days old",
-                  onChange: function(e) { upd("account_type", e.target.value) },
-                  className: "w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                },
-                  TYPES.map(function(t) { return React.createElement("option", {key:t, value:t}, t) })
+          ? React.createElement("div", {className:"py-8 text-center text-sm text-muted-foreground"}, "Loading config…")
+          : React.createElement("div", {className:"max-w-lg"},
+
+              React.createElement(SectionLabel, {icon: Zap}, "Generation"),
+              React.createElement("div", {className:"space-y-4"},
+                React.createElement("div", {className:"space-y-1.5"},
+                  React.createElement("label", {className:"text-sm font-medium"}, "Account type"),
+                  React.createElement("select", {
+                    value: cfg.account_type || "+30 days old",
+                    onChange: function(e) { upd("account_type", e.target.value) },
+                    className: "w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  }, TYPES.map(function(t) { return React.createElement("option", {key:t, value:t}, t) }))
+                ),
+                React.createElement("div", {className:"space-y-1.5"},
+                  React.createElement("label", {className:"text-sm font-medium"}, "New password"),
+                  React.createElement(Input, {value:cfg.new_password||"", onChange:function(e){upd("new_password",e.target.value)}, placeholder:"Leave blank to keep original"})
+                ),
+                React.createElement("div", {className:"space-y-1.5"},
+                  React.createElement("label", {className:"text-sm font-medium"}, "Target count"),
+                  React.createElement("p", {className:"text-xs text-muted-foreground -mt-0.5 mb-1.5"}, "0 = run until stopped manually"),
+                  React.createElement(Input, {value:cfg.target_count||0, onChange:function(e){upd("target_count",parseInt(e.target.value)||0)}, style:{width:120}})
                 )
               ),
-              React.createElement("div", {className:"space-y-1"},
-                React.createElement("label", {className:"text-sm font-medium"}, "New password"),
-                React.createElement(Input, {value:cfg.new_password||"", onChange:function(e){upd("new_password",e.target.value)}, placeholder:"Leave blank to keep original"})
+
+              React.createElement(SectionLabel, {icon: ShieldCheck}, "Vault & safety"),
+              React.createElement("div", {className:"space-y-4"},
+                React.createElement("div", {className:"flex gap-5"},
+                  React.createElement("label", {className:"flex items-center gap-2 text-sm cursor-pointer"},
+                    React.createElement("input", {type:"checkbox", checked:cfg.vault_enabled||false, onChange:function(e){upd("vault_enabled",e.target.checked)}}),
+                    "Push to vault"
+                  ),
+                  React.createElement("label", {className:"flex items-center gap-2 text-sm cursor-pointer"},
+                    React.createElement("input", {type:"checkbox", checked:cfg.ssl_verify||false, onChange:function(e){upd("ssl_verify",e.target.checked)}}),
+                    "Verify SSL"
+                  )
+                ),
+                React.createElement("div", {className:"space-y-1.5"},
+                  React.createElement("label", {className:"text-sm font-medium"}, "Stop after N empty in a row"),
+                  React.createElement("p", {className:"text-xs text-muted-foreground -mt-0.5 mb-1.5"}, "0 = never auto-stop on empty stock"),
+                  React.createElement(Input, {value:cfg.consecutive_empty_stop||5, onChange:function(e){upd("consecutive_empty_stop",parseInt(e.target.value)||0)}, style:{width:80}})
+                )
               ),
-              React.createElement("div", {className:"space-y-1"},
-                React.createElement("label", {className:"text-sm font-medium"}, "Target count (0 = unlimited)"),
-                React.createElement(Input, {value:cfg.target_count||0, onChange:function(e){upd("target_count",parseInt(e.target.value)||0)}, style:{width:120}})
-              ),
-              React.createElement("div", {className:"space-y-1"},
-                React.createElement("label", {className:"text-sm font-medium"}, "Bloxgen API keys (one per line)"),
+
+              React.createElement(SectionLabel, {icon: KeyRound}, "API keys"),
+              React.createElement("div", {className:"space-y-1.5"},
+                React.createElement("label", {className:"text-sm font-medium"}, "Bloxgen API keys"),
+                React.createElement("p", {className:"text-xs text-muted-foreground -mt-0.5 mb-1.5"}, "One per line"),
                 React.createElement("textarea", {
                   value: (cfg.bloxgen_keys||[]).join("\n"),
                   onChange: function(e) { upd("bloxgen_keys", e.target.value.split("\n").map(function(k){return k.trim()}).filter(Boolean)) },
@@ -336,24 +536,13 @@ export default function Generator() {
                   className: "w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-y"
                 })
               ),
-              React.createElement("div", {className:"flex gap-4"},
-                React.createElement("label", {className:"flex items-center gap-2 text-sm cursor-pointer"},
-                  React.createElement("input", {type:"checkbox", checked:cfg.vault_enabled||false, onChange:function(e){upd("vault_enabled",e.target.checked)}}),
-                  "Push to vault"
-                ),
-                React.createElement("label", {className:"flex items-center gap-2 text-sm cursor-pointer"},
-                  React.createElement("input", {type:"checkbox", checked:cfg.ssl_verify||false, onChange:function(e){upd("ssl_verify",e.target.checked)}}),
-                  "Verify SSL"
-                )
-              ),
-              React.createElement("div", {className:"space-y-1"},
-                React.createElement("label", {className:"text-sm font-medium"}, "Stop after N empty in a row (0 = never)"),
-                React.createElement(Input, {value:cfg.consecutive_empty_stop||5, onChange:function(e){upd("consecutive_empty_stop",parseInt(e.target.value)||0)}, style:{width:80}})
-              ),
-              React.createElement("div", {className:"flex items-center gap-3"},
+
+              React.createElement("div", {className:"flex items-center gap-3 mt-6 pt-4 border-t border-border"},
                 React.createElement(Button, {disabled:!dirty||saving, onClick:handleSave}, saving?"Saving...":"Save config"),
-                msg && React.createElement("span", {className:"text-sm text-green-400"}, msg),
-                dirty && !saving && React.createElement("span", {className:"text-sm text-yellow-400"}, "Unsaved changes")
+                msg && React.createElement("span", {className:"text-sm text-emerald-400 flex items-center gap-1"},
+                  React.createElement(CheckCircle2, {className:"h-3.5 w-3.5"}), msg
+                ),
+                dirty && !saving && React.createElement("span", {className:"text-sm text-amber-400"}, "Unsaved changes")
               )
             )
       )
