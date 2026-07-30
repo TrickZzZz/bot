@@ -1,3 +1,4 @@
+from __future__ import annotations
 """generator_core.py — DeltaCore engine for Railway. No UI deps."""
 import os
 import logging
@@ -35,7 +36,6 @@ DeltaCore Alt Generator - personal panel
 Run:      python DeltaCore_Alt_Generator_Personal.py
 """
 
-from __future__ import annotations
 
 import json
 import os
