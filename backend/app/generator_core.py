@@ -1209,16 +1209,26 @@ class GeneratorWorker:
                 try:
                     ok, reason = provider_change_password(cookie, old_pw, new_password, ssl_ctx)
                     logger.debug(f"pw change ok={ok} reason={reason}")
+                    # If Railway's own IP got the cookie rejected on auth grounds, retry the
+                    # SAME cookie through the residential proxy before giving up. This is not
+                    # a fresh login (which would introduce a new IP context and risk a
+                    # csrf-rejected mismatch) — it's the identical request, just a cleaner
+                    # exit IP, in case Roblox specifically distrusts Railway's address rather
+                    # than the cookie itself being stale.
+                    if not ok and reason and PROXY_URL and ("9002" in reason or "authenticat" in reason.lower()):
+                        logger.debug(f"pw change auth failure — retrying via proxy for {user}")
+                        ok2, reason2 = provider_change_password(cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
+                        logger.debug(f"pw change proxy retry ok={ok2} reason={reason2}")
+                        if ok2:
+                            ok, reason = ok2, reason2
+                            self.log(f"PW retry OK: {user} (via proxy)", "muted")
+                        else:
+                            reason = f"{reason} | proxy retry: {reason2}"
                     if ok:
                         final_pw = new_password
                         pw_changed = True
                         self.log(f"PW changed: {user}", "ok")
                     else:
-                        # Cookie from Bloxgen was stale/invalid. A fresh re-login is not
-                        # attempted here: Roblox challenges (Arkose/FunCaptcha) programmatic
-                        # logins from datacenter IPs like Railway's, so a retry would almost
-                        # always fail the same way — it just adds latency and a confusing
-                        # second error. Report the original failure plainly instead.
                         self.log(f"PW change failed: {user} ({reason})", "warn")
                 except Exception as exc:
                     logger.debug(f"pw change EXCEPTION: {exc}")
