@@ -1128,11 +1128,33 @@ class GeneratorWorker:
             if len(new_password) > 0 and len(new_password) < 8:
                 self.log(f"PW skip {user}: password too short ({len(new_password)} chars, need 8+)", "warn")
                 new_password = ""
+            if new_password and not cookie:
+                logger.debug(f"no cookie from bloxgen for {user} — attempting fresh login")
+                login_ok, login_result = roblox_login(user, old_pw, ssl_ctx)
+                if login_ok:
+                    cookie = login_result
+                else:
+                    self.log(f"PW skip {user}: no cookie, login failed ({login_result})", "warn")
+
             if new_password and cookie:
                 logger.debug(f"pw change for {user}")
                 try:
                     ok, reason = provider_change_password(cookie, old_pw, new_password, ssl_ctx)
                     logger.debug(f"pw change ok={ok} reason={reason}")
+                    # Bloxgen's supplied cookie can be stale/already-invalidated —
+                    # fall back to a fresh login with the account's own credentials
+                    # and retry once before giving up.
+                    if not ok and reason and ("9002" in reason or "authenticat" in reason.lower()):
+                        logger.debug(f"pw change auth failure — attempting fresh login for {user}")
+                        login_ok, login_result = roblox_login(user, old_pw, ssl_ctx)
+                        if login_ok:
+                            fresh_cookie = login_result
+                            ok, reason = provider_change_password(fresh_cookie, old_pw, new_password, ssl_ctx)
+                            logger.debug(f"pw change retry ok={ok} reason={reason}")
+                            if ok:
+                                self.log(f"PW retry OK: {user} (fresh login)", "muted")
+                        else:
+                            reason = f"{reason} | relogin failed: {login_result}"
                     if ok:
                         final_pw = new_password
                         pw_changed = True
