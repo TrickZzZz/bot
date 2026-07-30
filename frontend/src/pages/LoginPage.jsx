@@ -14,6 +14,8 @@ export default function LoginPage({ onAuthed }) {
   const [password, setPassword] = React.useState("")
   const [loading, setLoading] = React.useState(false)
 
+  const isRegister = mode === "register"
+
   const submit = async (e) => {
     e.preventDefault()
     setLoading(true)
@@ -32,6 +34,10 @@ export default function LoginPage({ onAuthed }) {
     }
   }
 
+  const toggleMode = () => {
+    setMode(isRegister ? "login" : "register")
+  }
+
   return (
     // 1. Added bg-[#09090b] here to ensure the dark canvas
     <div className="min-h-screen flex items-center justify-center p-4 relative overflow-hidden bg-[#09090b]">
@@ -48,7 +54,7 @@ export default function LoginPage({ onAuthed }) {
             <div>
               <CardTitle>Account Manager</CardTitle>
               <CardDescription>
-                Sign in to your vault
+                {isRegister ? "Create your account" : "Sign in to your vault"}
               </CardDescription>
             </div>
           </div>
@@ -72,22 +78,34 @@ export default function LoginPage({ onAuthed }) {
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                minLength={undefined}
+                autoComplete={isRegister ? "new-password" : "current-password"}
+                minLength={isRegister ? 8 : undefined}
                 required
               />
-              {mode === "register" && (
+              {isRegister && (
                 <p className="text-xs text-muted-foreground">Minimum 8 characters.</p>
               )}
             </div>
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
+              ) : isRegister ? (
+                <><UserPlus className="h-4 w-4" /> Create account</>
               ) : (
                 <><LogIn className="h-4 w-4" /> Sign in</>
               ) }
             </Button>
           </form>
+
+          <button
+            type="button"
+            onClick={toggleMode}
+            className="mt-4 w-full text-center text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            {isRegister
+              ? "Already have an account? Sign in"
+              : "Don't have an account? Create one"}
+          </button>
         </CardContent>
       </Card>
     </div>
