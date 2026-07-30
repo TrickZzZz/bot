@@ -20,7 +20,7 @@ from .generator_core import (
     GeneratorWorker, RunStats, Vault, TYPE_META, ACCOUNT_TYPES,
     load_config, save_config, load_usage, save_usage,
     DEFAULT_CONFIG,
-    _get_keys, _secure_load, make_ssl_context,
+    _get_keys, _secure_load, make_ssl_context, _http,
     bloxgen_daily_limit, bloxgen_stock,
     filter_accounts, load_accounts,
 )
@@ -35,16 +35,11 @@ class _Session:
         self.thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._pause = threading.Event()
-        self.log_q: deque = deque(maxlen=500)      # (message, level) tuples
+        self.log_q: deque = deque(maxlen=500)      # {msg, level} dicts
         self.stats: Optional[RunStats] = None
-        # Start with DEFAULT_CONFIG so vault_api/vault_user/vault_pass are always present
-        base = dict(DEFAULT_CONFIG)
-        saved = load_config()
-        # Only update non-vault keys from saved config
-        for k, v in saved.items():
-            if k not in ("vault_api", "vault_user", "vault_pass"):
-                base[k] = v
-        self.cfg: Dict[str, Any] = base
+        # load_config() seeds _MEM_CONFIG from DEFAULT_CONFIG on first call,
+        # so vault_api/vault_user/vault_pass are always present here.
+        self.cfg: Dict[str, Any] = load_config()
         self.usage: Dict[str, Any] = load_usage()
         self.key_states: Dict[int, Dict] = {}       # api_num -> {status, detail}
         self.stock_data: Dict[str, Any] = {}
@@ -74,6 +69,19 @@ class _Session:
 
     def queue_usage(self, key: str, count: int):
         pass  # usage handled by bump_key_usage() in generator_core
+
+    def build_run_cfg(self, overrides: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge frontend-editable fields into the persisted session config.
+
+        CRITICAL: never replace self.cfg outright with a frontend payload —
+        the GeneratorConfig schema deliberately excludes vault_api/vault_user/
+        vault_pass (so the browser can't see or override them). A naive
+        `self.cfg = overrides` wipes those keys permanently once save_config()
+        clears and rewrites _MEM_CONFIG from the (now incomplete) dict.
+        """
+        merged = dict(self.cfg)
+        merged.update(overrides)
+        return merged
 
 
 _session = _Session()
@@ -122,7 +130,9 @@ def start_session(config: GeneratorConfig, _=Depends(get_current_user)):
     if _session.is_running():
         raise HTTPException(400, "Session already running")
 
-    cfg = config.model_dump()
+    # Merge — NEVER replace. Preserves vault_api/vault_user/vault_pass,
+    # which the GeneratorConfig schema deliberately omits.
+    cfg = _session.build_run_cfg(config.model_dump())
     cfg["_dry_run"] = False
     _session.cfg = cfg
     save_config(cfg)
@@ -226,9 +236,10 @@ def dry_run(_=Depends(get_current_user)):
 def update_config(config: GeneratorConfig, _=Depends(get_current_user)):
     if _session.is_running():
         raise HTTPException(400, "Cannot update config while running")
-    # Merge — preserve vault credentials already in cfg (from DEFAULT_CONFIG)
-    _session.cfg.update(config.model_dump())
-    save_config(_session.cfg)
+    # Merge only — same rule as /start. Vault credentials untouched.
+    merged = _session.build_run_cfg(config.model_dump())
+    _session.cfg = merged
+    save_config(merged)
     return {"saved": True}
 
 
@@ -243,7 +254,10 @@ def get_config(_=Depends(get_current_user)):
 
 @router.get("/accounts")
 def get_accounts(search: str = "", account_type: str = "", _=Depends(get_current_user)):
-    """Fetch accounts from vault (source of truth on Railway)."""
+    """Fetch accounts from vault (source of truth — Railway has no persistent disk
+    for the local .deltacore_accounts.json fallback)."""
+    s = (search or "").strip().lower()
+    t = (account_type or "").strip().lower()
     try:
         ssl_ctx = make_ssl_context(bool(_session.cfg.get("ssl_verify", True)))
         v = Vault(
@@ -253,39 +267,44 @@ def get_accounts(search: str = "", account_type: str = "", _=Depends(get_current
             ssl_ctx,
         )
         v.login()
-        code, body, _ = _http(
+        code, body, _hdrs = _http(
             "GET", f"{v.base}/accounts",
             headers=v._hdr(), ssl_ctx=ssl_ctx,
         )
+        if code < 200 or code >= 300:
+            raise RuntimeError(f"vault /accounts HTTP {code}")
         raw = []
         if isinstance(body, list):
             raw = body
         elif isinstance(body, dict):
             raw = body.get("accounts", [])
-        # Normalise to our format
+
         accounts = []
         for a in raw:
-            if not isinstance(a, dict): continue
-            user = a.get("username") or a.get("user") or ""
-            pw   = a.get("password") or a.get("pass") or ""
-            s = search.strip().lower()
-            t = (account_type or "").strip().lower()
-            if s and s not in user.lower() and s not in pw.lower(): continue
+            if not isinstance(a, dict):
+                continue
+            user = str(a.get("username") or a.get("user") or "")
+            pw = str(a.get("password") or a.get("pass") or "")
+            a_type = str(a.get("type") or a.get("account_type") or "")
+            if s and s not in user.lower() and s not in pw.lower():
+                continue
+            if t and a_type.strip().lower() != t:
+                continue
             accounts.append({
                 "user": user,
                 "pass": pw[:2] + "***" + pw[-2:] if len(pw) > 4 else "***",
                 "date": a.get("date") or a.get("created_at") or "—",
                 "age": a.get("age") or "—",
-                "type": a.get("type") or "—",
+                "type": a_type or "—",
                 "pw_changed": bool(a.get("pw_changed") or a.get("password_changed")),
                 "vault_pushed": True,
             })
         return accounts[:200]
     except Exception as e:
-        # Fallback to local accounts
+        # Fallback to local file (only useful if a disk-backed run wrote it)
         accounts = filter_accounts(search=search, account_type=account_type or "")
         return [
-            {**a, "pass": a["pass"][:2] + "***" + a["pass"][-2:] if len(a.get("pass","")) > 4 else "***"}
+            {**a, "pass": a["pass"][:2] + "***" + a["pass"][-2:] if len(a.get("pass", "")) > 4 else "***"}
             for a in accounts[:200]
         ]
 
@@ -308,15 +327,24 @@ def get_limits(_=Depends(get_current_user)):
                 results.append(fut.result())
             except Exception:
                 pass
-    stock = {}
+    stock: Dict[str, Any] = {}
+    stock_error = None
     for k in keys:
         try:
             raw = bloxgen_stock(k, ssl_ctx)
             stock = {t: v for t, v in raw.items() if t in TYPE_META}
+            stock_error = None
             break
-        except Exception:
-            pass
-    return {"limits": results, "stock": stock, "types": ACCOUNT_TYPES}
+        except Exception as e:
+            stock_error = str(e)
+            continue
+
+    return {
+        "limits": results,
+        "stock": stock,
+        "types": ACCOUNT_TYPES,
+        "stock_error": stock_error if not stock else None,
+    }
 
 
 @router.get("/stream")
