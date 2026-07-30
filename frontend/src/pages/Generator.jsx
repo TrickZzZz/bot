@@ -247,9 +247,11 @@ export default function Generator() {
                     : has
                       ? React.createElement("span", {className:"text-green-400"}, "in stock")
                       : React.createElement("span", {className:"text-red-400"}, "no stock")
-                  return React.createElement("tr", {key:t, className:"border-b border-border/60 last:border-0"},
-                    React.createElement("td", {className:"px-3 py-2"}, t),
-                    React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, s && s.count ? s.count : "—"),
+                  var typeName = t || "unknown"
+                  var stockCount = s && (s.count || s.quantity || s.stock) ? (s.count || s.quantity || s.stock) : "—"
+                  return React.createElement("tr", {key:typeName, className:"border-b border-border/60 last:border-0"},
+                    React.createElement("td", {className:"px-3 py-2 font-medium"}, typeName),
+                    React.createElement("td", {className:"px-3 py-2 text-muted-foreground"}, stockCount),
                     React.createElement("td", {className:"px-3 py-2"}, statusEl)
                   )
                 })
