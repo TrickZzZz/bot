@@ -1,5 +1,5 @@
 import * as React from "react"
- 
+
 const LEVEL_COLOR = {
   ok: "#3fb950", error: "#f85149", warn: "#d29922",
   muted: "#484f58", info: "#8b949e", __done__: "#484f58",
@@ -9,7 +9,7 @@ const KEY_COLOR = {
   warn: "#d29922", error: "#f85149", dead: "#f85149",
 }
 const ACCOUNT_TYPES = ["+30 days old", "+1 year old", "5+ years old", "dump"]
-const BASE = () => (import.meta.env.VITE_API_URL ?? "http://localhost:8000")
+const BASE = () => (import.meta.env.VITE_API_BASE || "http://localhost:8000")
 
 async function genApi(path, method = "GET", body) {
   const token = localStorage.getItem("access_token")
@@ -163,9 +163,7 @@ export default function Generator() {
 
                   <div>
                     <label style={S.label}>Stop after N consecutive empty (0 = never)</label>
-                    <input type="number" min="0" value={cfg.consecutive_empty_stop ?? 5}
-                      onChange={(e) => updateCfg("consecutive_empty_stop", parseInt(e.target.value) || 0)}
-                      style={{ ...S.input, width: 80 }} />
+                    <input type="number" min="0" value={cfg.consecutive_empty_stop ?? 5} onChange={(e) => updateCfg("consecutive_empty_stop", parseInt(e.target.value) || 0)} style={{ ...S.input, width: 80 }} />
                   </div>
 
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
