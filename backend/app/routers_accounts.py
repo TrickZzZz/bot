@@ -7,7 +7,7 @@ from sqlalchemy import or_
 from .database import get_db
 from . import models, schemas
 # from .security import encrypt_secret, decrypt_secret
-from .deps import get_current_user
+from .deps import require_admin
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
@@ -25,6 +25,7 @@ def _to_out(acc: models.Account) -> schemas.AccountOut:
 @router.get("", response_model=List[schemas.AccountOut])
 def list_accounts(
     search: str = "",
+    _=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     query = db.query(models.Account)
@@ -40,6 +41,7 @@ def list_accounts(
 @router.get("/{account_id}", response_model=schemas.AccountOut)
 def get_account(
     account_id: int,
+    _=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     acc = (
@@ -55,6 +57,7 @@ def get_account(
 @router.post("", response_model=schemas.AccountOut, status_code=status.HTTP_201_CREATED)
 def create_account(
     payload: schemas.AccountCreate,
+    _=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     acc = models.Account(
@@ -71,6 +74,7 @@ def create_account(
 def update_account(
     account_id: int,
     payload: schemas.AccountUpdate,
+    _=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     acc = (
@@ -95,7 +99,7 @@ def update_account(
 @router.delete("/{account_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_account(
     account_id: int,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     acc = (
@@ -113,7 +117,7 @@ def delete_account(
 @router.post("/bulk-import", response_model=schemas.BulkImportResult)
 def bulk_import(
     payload: schemas.BulkImportRequest,
-    current_user: models.User = Depends(get_current_user),
+    current_user: models.User = Depends(require_admin),
     db: Session = Depends(get_db),
 ):
     created = 0

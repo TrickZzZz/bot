@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from .deps import get_current_user
+from .deps import get_current_user, is_admin, is_admin_username, require_admin
 from .database import get_db
 from . import models
 from .generator_core import (
@@ -30,26 +30,6 @@ from .generator_core import (
 
 router = APIRouter(prefix="/generator", tags=["generator"])
 
-# ── Admin access control ────────────────────────────────────────────────────
-# Comma-separated list of usernames allowed to see vault data, Bloxgen API
-# keys, and the Accounts tab. If unset, everyone is treated as admin — this
-# keeps existing single-user setups working with zero config. Set this env
-# var the moment you add a second (non-admin) account.
-import os as _os
-_ADMIN_USERNAMES = {
-    u.strip().lower() for u in _os.environ.get("ADMIN_USERNAMES", "").split(",") if u.strip()
-}
-
-def _is_admin(user) -> bool:
-    if not _ADMIN_USERNAMES:
-        return True  # not configured yet — don't lock the owner out
-    return str(getattr(user, "username", "")).strip().lower() in _ADMIN_USERNAMES
-
-def require_admin(user=Depends(get_current_user)):
-    if not _is_admin(user):
-        raise HTTPException(403, "Admin access required")
-    return user
-
 
 @router.get("/admin/users")
 def list_users(_=Depends(require_admin), db: Session = Depends(get_db)):
@@ -61,7 +41,7 @@ def list_users(_=Depends(require_admin), db: Session = Depends(get_db)):
         uname = str(getattr(u, "username", ""))
         entry = {
             "username": uname,
-            "is_admin": (not _ADMIN_USERNAMES) or (uname.strip().lower() in _ADMIN_USERNAMES),
+            "is_admin": is_admin_username(uname),
         }
         # Include created_at if the model happens to have it — optional field,
         # don't fail the whole request if it doesn't exist.
@@ -192,7 +172,7 @@ def get_status(user=Depends(get_current_user)):
         done=s.done if s else 0,
         stock_empty=s.stock_empty if s else 0,
         fails=s.fails if s else 0,
-        vault_stock=_session.cfg.get("_vault_stock", -1) if _is_admin(user) else -1,
+        vault_stock=_session.cfg.get("_vault_stock", -1) if is_admin(user) else -1,
         key_states=_session.key_states,
         account_type=_session.cfg.get("account_type", "+30 days old"),
     )
@@ -204,7 +184,7 @@ def start_session(config: GeneratorConfig, user=Depends(get_current_user)):
         raise HTTPException(400, "Session already running")
 
     overrides = config.model_dump()
-    if not _is_admin(user):
+    if not is_admin(user):
         # Non-admins can never enable vault pushes or supply their own keys,
         # no matter what the request body claims — server-side enforcement,
         # not just a hidden UI checkbox.
@@ -320,7 +300,7 @@ def update_config(config: GeneratorConfig, user=Depends(get_current_user)):
     if _session.is_running():
         raise HTTPException(400, "Cannot update config while running")
     overrides = config.model_dump()
-    if not _is_admin(user):
+    if not is_admin(user):
         overrides["vault_enabled"] = False
         overrides.pop("bloxgen_keys", None)  # non-admins can't see or set keys
     # Merge only — same rule as /start. Vault credentials untouched.
@@ -336,7 +316,7 @@ def get_config(user=Depends(get_current_user)):
     # Never send vault credentials to frontend
     for k in ("vault_pass", "vault_api", "vault_user", "_dry_run"):
         cfg.pop(k, None)
-    admin = _is_admin(user)
+    admin = is_admin(user)
     cfg["is_admin"] = admin
     if not admin:
         cfg["bloxgen_keys"] = []       # keys stay invisible to non-admins
@@ -354,7 +334,7 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, us
     t = (account_type or "").strip().lower()
     limit = max(1, min(limit, 5000))
 
-    if not _is_admin(user):
+    if not is_admin(user):
         my_username = str(getattr(user, "username", "")).strip().lower()
         with _session_owner_lock:
             my_session_ids = {
@@ -678,7 +658,7 @@ async def stream_logs(token: str = ""):
         # check silently falls back to treating the viewer as non-admin
         # (fails closed — safer than accidentally exposing vault lines).
         viewer_username = str(payload.get("sub", "")).strip().lower()
-        is_admin_viewer = (not _ADMIN_USERNAMES) or (viewer_username in _ADMIN_USERNAMES)
+        is_admin_viewer = is_admin_username(viewer_username)
     except Exception:
         from fastapi.responses import Response
         return Response(status_code=401)
