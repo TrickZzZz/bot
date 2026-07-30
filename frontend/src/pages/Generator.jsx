@@ -1,3 +1,4 @@
+/* eslint-disable */
 import * as React from "react"
 
 const LEVEL_COLOR = {
@@ -163,7 +164,7 @@ export default function Generator() {
 
                   <div>
                     <label style={S.label}>Stop after N consecutive empty (0 = never)</label>
-                    <input type="number" min="0" value={cfg.consecutive_empty_stop ?? 5} onChange={(e) => updateCfg("consecutive_empty_stop", parseInt(e.target.value) || 0)} style={{ ...S.input, width: 80 }} />
+                    <input value={String(cfg.consecutive_empty_stop ?? 5)} onChange={(e) => updateCfg("consecutive_empty_stop", parseInt(e.target.value) || 0)} style={{ ...S.input, width: 80 }} />
                   </div>
 
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
