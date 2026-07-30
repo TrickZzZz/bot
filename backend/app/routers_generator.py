@@ -27,6 +27,26 @@ from .generator_core import (
 
 router = APIRouter(prefix="/generator", tags=["generator"])
 
+# ── Admin access control ────────────────────────────────────────────────────
+# Comma-separated list of usernames allowed to see vault data, Bloxgen API
+# keys, and the Accounts tab. If unset, everyone is treated as admin — this
+# keeps existing single-user setups working with zero config. Set this env
+# var the moment you add a second (non-admin) account.
+import os as _os
+_ADMIN_USERNAMES = {
+    u.strip().lower() for u in _os.environ.get("ADMIN_USERNAMES", "").split(",") if u.strip()
+}
+
+def _is_admin(user) -> bool:
+    if not _ADMIN_USERNAMES:
+        return True  # not configured yet — don't lock the owner out
+    return str(getattr(user, "username", "")).strip().lower() in _ADMIN_USERNAMES
+
+def require_admin(user=Depends(get_current_user)):
+    if not _is_admin(user):
+        raise HTTPException(403, "Admin access required")
+    return user
+
 
 def _format_vault_date(raw) -> str:
     """Convert whatever date format the vault returns into something readable.
@@ -133,7 +153,7 @@ class StatusResponse(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.get("/status", response_model=StatusResponse)
-def get_status(_=Depends(get_current_user)):
+def get_status(user=Depends(get_current_user)):
     s = _session.stats
     return StatusResponse(
         running=_session.is_running(),
@@ -141,20 +161,28 @@ def get_status(_=Depends(get_current_user)):
         done=s.done if s else 0,
         stock_empty=s.stock_empty if s else 0,
         fails=s.fails if s else 0,
-        vault_stock=_session.cfg.get("_vault_stock", -1),
+        vault_stock=_session.cfg.get("_vault_stock", -1) if _is_admin(user) else -1,
         key_states=_session.key_states,
         account_type=_session.cfg.get("account_type", "+30 days old"),
     )
 
 
 @router.post("/start")
-def start_session(config: GeneratorConfig, _=Depends(get_current_user)):
+def start_session(config: GeneratorConfig, user=Depends(get_current_user)):
     if _session.is_running():
         raise HTTPException(400, "Session already running")
 
+    overrides = config.model_dump()
+    if not _is_admin(user):
+        # Non-admins can never enable vault pushes or supply their own keys,
+        # no matter what the request body claims — server-side enforcement,
+        # not just a hidden UI checkbox.
+        overrides["vault_enabled"] = False
+        overrides.pop("bloxgen_keys", None)  # keep whatever admin already configured
+
     # Merge — NEVER replace. Preserves vault_api/vault_user/vault_pass,
     # which the GeneratorConfig schema deliberately omits.
-    cfg = _session.build_run_cfg(config.model_dump())
+    cfg = _session.build_run_cfg(overrides)
     cfg["_dry_run"] = False
     _session.cfg = cfg
     save_config(cfg)
@@ -255,27 +283,36 @@ def dry_run(_=Depends(get_current_user)):
 
 
 @router.post("/config")
-def update_config(config: GeneratorConfig, _=Depends(get_current_user)):
+def update_config(config: GeneratorConfig, user=Depends(get_current_user)):
     if _session.is_running():
         raise HTTPException(400, "Cannot update config while running")
+    overrides = config.model_dump()
+    if not _is_admin(user):
+        overrides["vault_enabled"] = False
+        overrides.pop("bloxgen_keys", None)  # non-admins can't see or set keys
     # Merge only — same rule as /start. Vault credentials untouched.
-    merged = _session.build_run_cfg(config.model_dump())
+    merged = _session.build_run_cfg(overrides)
     _session.cfg = merged
     save_config(merged)
     return {"saved": True}
 
 
 @router.get("/config")
-def get_config(_=Depends(get_current_user)):
+def get_config(user=Depends(get_current_user)):
     cfg = dict(_session.cfg)
     # Never send vault credentials to frontend
     for k in ("vault_pass", "vault_api", "vault_user", "_dry_run"):
         cfg.pop(k, None)
+    admin = _is_admin(user)
+    cfg["is_admin"] = admin
+    if not admin:
+        cfg["bloxgen_keys"] = []       # keys stay invisible to non-admins
+        cfg["vault_enabled"] = False   # reflect the server-enforced state
     return cfg
 
 
 @router.get("/accounts")
-def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=Depends(get_current_user)):
+def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=Depends(require_admin)):
     """Fetch accounts from vault (source of truth — Railway has no persistent disk
     for the local .deltacore_accounts.json fallback)."""
     s = (search or "").strip().lower()
@@ -343,7 +380,7 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, _=
 
 
 @router.post("/accounts/change-passwords")
-def change_unchanged_passwords(_=Depends(get_current_user)):
+def change_unchanged_passwords(_=Depends(require_admin)):
     """Bulk password change for vault accounts that haven't been changed yet.
 
     Each account needs a fresh Roblox login (no cookie is stored in the vault
@@ -420,10 +457,16 @@ def change_unchanged_passwords(_=Depends(get_current_user)):
                 except Exception as e:
                     login_ok, login_result = False, str(e)
                 if not login_ok:
-                    is_challenge = "challenge" in str(login_result).lower()
-                    if is_challenge:
-                        _session.queue_log(f"Skip {user}: Roblox requires verification from this server (expected on Railway)", "warn")
-                        _bump("roblox-challenge")
+                    result_str = str(login_result).lower()
+                    if "no 2captcha key configured" in result_str:
+                        _session.queue_log(f"Skip {user}: 2Captcha key not configured on the server", "error")
+                        _bump("2captcha-not-configured")
+                    elif "captcha solve failed" in result_str:
+                        _session.queue_log(f"Skip {user}: 2Captcha could not solve it ({login_result})", "warn")
+                        _bump("2captcha-solve-failed")
+                    elif "challenge" in result_str:
+                        _session.queue_log(f"Skip {user}: Roblox still rejected it after captcha solving ({login_result})", "warn")
+                        _bump("roblox-challenge-after-solve")
                     else:
                         _session.queue_log(f"Skip {user}: login failed ({login_result})", "warn")
                         _bump("login-other")
@@ -450,7 +493,9 @@ def change_unchanged_passwords(_=Depends(get_current_user)):
             if skip_reasons:
                 for reason, count in sorted(skip_reasons.items(), key=lambda x: -x[1]):
                     label = {
-                        "roblox-challenge": "Roblox verification challenge (expected from this server)",
+                        "2captcha-not-configured": "2Captcha key missing — set TWOCAPTCHA_API_KEY on Railway",
+                        "2captcha-solve-failed": "2Captcha couldn't solve the challenge",
+                        "roblox-challenge-after-solve": "Roblox rejected it even after a solved captcha",
                         "login-other": "login failed (other reason)",
                         "pw-change-failed": "password change rejected",
                         "already-target-password": "already using target password",
@@ -546,18 +591,25 @@ async def stream_logs(token: str = ""):
     """Server-Sent Events — streams live feed to browser.
     Uses ?token= query param because EventSource cannot set Authorization headers.
     """
-    # Validate JWT manually (same logic as get_current_user in deps.py)
-    from jose import jwt, JWTError
+    from jose import jwt
     import os
+    is_admin_viewer = True
     try:
         secret = os.environ.get("JWT_SECRET_KEY", "")
         algo   = os.environ.get("JWT_ALGORITHM", "HS256")
         if not secret or not token:
             raise ValueError("missing token or secret")
-        jwt.decode(token, secret, algorithms=[algo])
+        payload = jwt.decode(token, secret, algorithms=[algo])
+        # Standard FastAPI/OAuth2 convention stores the username under "sub".
+        # If this project's security.py uses a different claim name, this
+        # check silently falls back to treating the viewer as non-admin
+        # (fails closed — safer than accidentally exposing vault lines).
+        viewer_username = str(payload.get("sub", "")).strip().lower()
+        is_admin_viewer = (not _ADMIN_USERNAMES) or (viewer_username in _ADMIN_USERNAMES)
     except Exception:
         from fastapi.responses import Response
         return Response(status_code=401)
+
     async def event_generator():
         last_len = 0
         heartbeat = 0
@@ -568,6 +620,12 @@ async def stream_logs(token: str = ""):
                 if item["level"] == "__done__":
                     yield f"data: {json.dumps({'done': True})}\n\n"
                     return
+                # This feed is a single shared broadcast — if an admin is
+                # running a vault-enabled session while a non-admin happens
+                # to be watching, redact vault-related lines rather than
+                # leak them through the shared stream.
+                if not is_admin_viewer and "vault" in item.get("msg", "").lower():
+                    continue
                 yield f"data: {json.dumps(item)}\n\n"
             last_len = len(current)
             heartbeat += 1
