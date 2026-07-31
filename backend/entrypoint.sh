@@ -39,9 +39,17 @@ if setup_warp; then
     done
     if [ "$connected" -eq 0 ]; then
         echo "[entrypoint] WARP did not report Connected within 20s — continuing without it"
+        echo "[entrypoint] --- warp-cli status (full output) ---"
+        warp-cli --accept-tos status 2>&1 || echo "[entrypoint] (status command itself failed)"
+        echo "[entrypoint] --- warp-svc.log (last 40 lines) ---"
+        tail -n 40 /var/log/warp-svc.log 2>&1 || echo "[entrypoint] (no warp-svc.log found)"
+        echo "[entrypoint] --- end diagnostics ---"
     fi
 else
     echo "[entrypoint] WARP setup failed — continuing without it. Roblox calls fall back to the residential proxy only."
+    echo "[entrypoint] --- warp-svc.log (last 40 lines) ---"
+    tail -n 40 /var/log/warp-svc.log 2>&1 || echo "[entrypoint] (no warp-svc.log found)"
+    echo "[entrypoint] --- end diagnostics ---"
 fi
 
 # Always start the real application, regardless of WARP's outcome above.
