@@ -143,3 +143,43 @@ def bulk_import(
 
     db.commit()
     return schemas.BulkImportResult(created=created, failed=len(errors), errors=errors)
+
+
+@router.post("/migrate-encryption")
+def migrate_encryption(
+    current_user: models.User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """One-time fix for rows whose password was stored as plaintext instead
+    of Fernet ciphertext (e.g. from a bulk-import path that predated proper
+    encryption). For every account: if the stored value already decrypts
+    successfully, it's left untouched — already correct, no risk of double
+    encryption. If decryption fails, the raw stored value is treated as
+    legacy plaintext and re-encrypted in place. Safe to run more than once;
+    already-encrypted rows are always skipped."""
+    accounts = db.query(models.Account).all()
+    already_ok = 0
+    migrated = 0
+    failed: List[str] = []
+
+    for acc in accounts:
+        try:
+            decrypt_secret(acc.password)
+            already_ok += 1
+            continue
+        except Exception:
+            pass
+        try:
+            acc.password = encrypt_secret(acc.password)
+            migrated += 1
+        except Exception as e:
+            failed.append(f"{acc.username} (id={acc.id}): {e}")
+
+    db.commit()
+    return {
+        "total": len(accounts),
+        "already_encrypted": already_ok,
+        "migrated": migrated,
+        "failed": len(failed),
+        "failed_details": failed[:50],  # cap the list so a huge failure count doesn't blow up the response
+    }
