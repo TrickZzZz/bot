@@ -521,7 +521,7 @@ def _warp_currently_healthy() -> bool:
         age = time.time() - _warp_health_cache["checked_at"]
         if _warp_health_cache["healthy"] is not None and age < _WARP_HEALTH_CACHE_TTL:
             return _warp_health_cache["healthy"]
-    ok, _detail = check_warp_status(timeout=4.0)
+    ok, _detail = check_warp_status(timeout=4.0, retries=1)
     with _warp_health_lock:
         _warp_health_cache["healthy"] = ok
         _warp_health_cache["checked_at"] = time.time()
@@ -549,29 +549,44 @@ def _get_active_proxy_opener():
     return None
 
 
-def check_warp_status(timeout: float = 8.0) -> Tuple[bool, str]:
+def check_warp_status(timeout: float = 8.0, retries: int = 2) -> Tuple[bool, str]:
     """Live test of whether WARP is actually usable RIGHT NOW — not whether
     it connected at container boot (that can change: a boot that failed can
     recover, and a boot that succeeded can later degrade). Makes a real
     request through the local WARP SOCKS5 proxy to Cloudflare's own trace
     endpoint, exactly like entrypoint.sh's own startup check, but callable
-    on demand from the running app."""
+    on demand from the running app.
+
+    Retries a couple of times before concluding "not working" — on a
+    partially-degraded (lossy but not fully dead) connection, a single
+    request succeeding or failing is close to a coin flip, since it depends
+    on whether that one request's packets happened to get through. One
+    unlucky sample shouldn't be reported as a hard "disconnected"."""
     if not WARP_ENABLED:
         return False, "WARP not enabled (ROBLOX_USE_WARP is not set)"
     try:
         opener = _get_warp_opener()
     except Exception as e:
         return False, f"WARP opener could not be built: {e}"
-    try:
-        req = urllib.request.Request("https://cloudflare.com/cdn-cgi/trace")
-        with opener.open(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-        warp_line = next((l for l in body.splitlines() if l.startswith("warp=")), "")
-        if warp_line in ("warp=on", "warp=plus"):
-            return True, warp_line
-        return False, f"proxy responded but not via WARP ({warp_line or 'no warp= line found'})"
-    except Exception as e:
-        return False, f"request through WARP proxy failed: {e}"
+
+    last_detail = ""
+    attempts = max(1, retries + 1)
+    for attempt in range(attempts):
+        try:
+            req = urllib.request.Request("https://cloudflare.com/cdn-cgi/trace")
+            with opener.open(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+            warp_line = next((l for l in body.splitlines() if l.startswith("warp=")), "")
+            if warp_line in ("warp=on", "warp=plus"):
+                if attempt > 0:
+                    return True, f"{warp_line} (succeeded on attempt {attempt + 1}/{attempts})"
+                return True, warp_line
+            last_detail = f"proxy responded but not via WARP ({warp_line or 'no warp= line found'})"
+        except Exception as e:
+            last_detail = f"request through WARP proxy failed: {e}"
+        if attempt < attempts - 1:
+            time.sleep(1.5)
+    return False, f"{last_detail} (after {attempts} attempts)"
 
 def _http(
     method: str,
