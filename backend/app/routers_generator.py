@@ -566,6 +566,11 @@ def change_unchanged_passwords(user=Depends(require_admin)):
                     time.sleep(0.5)
                     continue
                 ok, reason = provider_change_password(login_result, old_pw, new_password, ssl_ctx, use_proxy=True)
+                if not ok and str(reason).startswith("net:"):
+                    # Transient network hiccup (WARP's connection quality can
+                    # vary moment to moment) rather than a real rejection —
+                    # one retry before counting this as a genuine failure.
+                    ok, reason = provider_change_password(login_result, old_pw, new_password, ssl_ctx, use_proxy=True)
                 if not ok:
                     _session.queue_log(f"Skip {user}: PW change failed ({reason})", "warn")
                     _bump("pw-change-failed")

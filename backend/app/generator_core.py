@@ -1484,14 +1484,26 @@ class GeneratorWorker:
                     _flog(f"pw change [1:cookie] ok={ok} reason={reason}")
 
                     # Step 2: same cookie, same request, routed through the residential
-                    # proxy instead. No new login — just a cleaner exit IP. Runs on
-                    # ANY step-1 failure (not just auth-specific errors) whenever a
-                    # proxy is configured, since a cleaner IP can help with more than
-                    # just 9002/not-authenticated responses.
-                    if not ok and PROXY_URL:
+                    # proxy (or WARP, if enabled — see _get_active_proxy_opener) instead.
+                    # No new login — just a cleaner exit IP. Runs on ANY step-1 failure
+                    # (not just auth-specific errors) whenever SOME proxy path exists.
+                    if not ok and (PROXY_URL or WARP_ENABLED):
                         _flog(f"pw change step 1 failed — retrying via proxy for {user}")
                         ok, reason2 = provider_change_password(cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
                         _flog(f"pw change [2:cookie+proxy] ok={ok} reason={reason2}")
+
+                        # A "net:" prefixed reason means a raw network-level hiccup
+                        # (timeout, dropped connection, SSL reset) rather than a real
+                        # rejection from Roblox — we've directly observed WARP's own
+                        # connection quality vary moment to moment, so a single transient
+                        # failure here doesn't mean the path is dead. One extra retry
+                        # before giving up on this step.
+                        if not ok and reason2.startswith("net:"):
+                            _flog(f"pw change step 2 hit a transient network error — retrying once more for {user}")
+                            ok, reason2b = provider_change_password(cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
+                            _flog(f"pw change [2b:cookie+proxy retry] ok={ok} reason={reason2b}")
+                            reason2 = reason2b if not ok else reason2
+
                         if ok:
                             self.log(f"PW retry OK: {user} (cookie via proxy)", "muted")
                         else:
@@ -1503,7 +1515,7 @@ class GeneratorWorker:
                     # internally if Roblox actually demands a captcha — so step 3 (plain
                     # login) and step 4 (login + solved captcha) happen as one call here,
                     # in that order, automatically.
-                    if not ok and PROXY_URL:
+                    if not ok and (PROXY_URL or WARP_ENABLED):
                         _flog(f"cookie exhausted — attempting fresh login for {user}")
                         login_ok, login_result = roblox_login(user, old_pw, ssl_ctx, use_proxy=True)
                         if login_ok:
