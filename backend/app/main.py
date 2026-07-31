@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from .database import Base, engine
-from . import routers_auth, routers_accounts, routers_generator
+from . import routers_auth, routers_accounts
 
 
 Base.metadata.create_all(bind=engine)
@@ -27,7 +27,6 @@ app.add_middleware(
 
 app.include_router(routers_auth.router)
 app.include_router(routers_accounts.router)
-app.include_router(routers_generator.router)
 
 
 @app.get("/health")
