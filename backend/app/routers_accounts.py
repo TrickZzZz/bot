@@ -6,7 +6,7 @@ from sqlalchemy import or_
 
 from .database import get_db
 from . import models, schemas
-# from .security import encrypt_secret, decrypt_secret
+from .security import encrypt_secret, decrypt_secret
 from .deps import require_admin
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -16,7 +16,8 @@ def _to_out(acc: models.Account) -> schemas.AccountOut:
     return schemas.AccountOut(
         id=acc.id,
         username=acc.username,
-        password=acc.password,
+        url=acc.url,
+        password=decrypt_secret(acc.password),
         created_at=acc.created_at,
         updated_at=acc.updated_at,
     )
@@ -32,7 +33,7 @@ def list_accounts(
     if search:
         like = f"%{search}%"
         query = query.filter(
-            or_(models.Account.service_name.ilike(like), models.Account.username.ilike(like))
+            or_(models.Account.username.ilike(like), models.Account.url.ilike(like))
         )
     accounts = query.order_by(models.Account.id.asc()).all()
     return [_to_out(a) for a in accounts]
@@ -62,7 +63,8 @@ def create_account(
 ):
     acc = models.Account(
         username=payload.username,
-        password=payload.password,
+        url=payload.url,
+        password=encrypt_secret(payload.password),
     )
     db.add(acc)
     db.commit()
@@ -87,7 +89,7 @@ def update_account(
 
     data = payload.model_dump(exclude_unset=True)
     if "password" in data:
-        acc.password = data.pop("password")
+        acc.password = encrypt_secret(data.pop("password"))
     for field, value in data.items():
         setattr(acc, field, value)
 
@@ -127,13 +129,14 @@ def bulk_import(
         try:
             acc = models.Account(
                 username=item.username,
-                password=item.password,
+                url=item.url,
+                password=encrypt_secret(item.password),
             )
             db.add(acc)
             db.flush()
             created += 1
         except Exception as e:
-            errors.append(f"Row {idx + 1} ({item.service_name}): {str(e)}")
+            errors.append(f"Row {idx + 1} ({item.username}): {str(e)}")
 
     db.commit()
     return schemas.BulkImportResult(created=created, failed=len(errors), errors=errors)
