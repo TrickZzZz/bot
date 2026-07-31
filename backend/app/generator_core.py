@@ -505,19 +505,45 @@ def _get_warp_opener():
     return _warp_opener
 
 
+_warp_health_cache: Dict[str, Any] = {"healthy": None, "checked_at": 0.0}
+_warp_health_lock = threading.Lock()
+_WARP_HEALTH_CACHE_TTL = 60.0  # seconds a health result stays valid before re-checking
+
+def _warp_currently_healthy() -> bool:
+    """Cheap, cached answer to 'was WARP healthy as of the last check' —
+    refreshed at most once per _WARP_HEALTH_CACHE_TTL seconds. Lets the
+    escalation chain skip straight to the residential proxy when we already
+    know WARP is degraded, instead of waiting out a slow timeout on every
+    single call before falling through. Does not replace check_warp_status()
+    (used by the admin status button for a guaranteed-live answer) — this is
+    purely an internal fast-path optimization."""
+    with _warp_health_lock:
+        age = time.time() - _warp_health_cache["checked_at"]
+        if _warp_health_cache["healthy"] is not None and age < _WARP_HEALTH_CACHE_TTL:
+            return _warp_health_cache["healthy"]
+    ok, _detail = check_warp_status(timeout=4.0)
+    with _warp_health_lock:
+        _warp_health_cache["healthy"] = ok
+        _warp_health_cache["checked_at"] = time.time()
+    return ok
+
+
 def _get_active_proxy_opener():
     """Whatever opener 'use_proxy=True' should actually mean right now.
     WARP transparently takes over from the residential proxy when enabled —
     every existing use_proxy=True call site in the escalation chain benefits
     automatically, with zero changes needed outside this function. Falls
-    back to the residential proxy if WARP isn't enabled or fails to build
-    (e.g. PySocks not installed), and to no proxy at all if neither is
-    configured."""
+    back to the residential proxy if WARP isn't enabled, is known-unhealthy
+    from a recent check, or fails to build (e.g. PySocks not installed);
+    falls back to no proxy at all if neither is configured."""
     if WARP_ENABLED:
-        try:
-            return _get_warp_opener()
-        except Exception as e:
-            _flog(f"WARP opener unavailable, falling back: {e}")
+        if _warp_currently_healthy():
+            try:
+                return _get_warp_opener()
+            except Exception as e:
+                _flog(f"WARP opener unavailable, falling back: {e}")
+        else:
+            _flog("WARP known-unhealthy from a recent check — skipping straight to residential proxy")
     if PROXY_URL:
         return _get_proxy_opener()
     return None
