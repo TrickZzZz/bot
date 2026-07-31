@@ -1,7 +1,7 @@
 import * as React from "react"
 import {
   ShieldCheck, Plus, Search, Pencil, Trash2, Eye, EyeOff, Copy, Check,
-  Upload, LogOut, Loader2, KeyRound, Zap,
+  Upload, LogOut, Loader2, KeyRound,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/dialog"
 import { useToast } from "@/components/ui/toast"
 import { api, clearToken } from "@/lib/api"
-import Generator from "./Generator"
 
 const EMPTY_FORM = { username: "", password: "" }
 
@@ -41,7 +40,7 @@ function PasswordCell({ value }) {
 
 export default function DashboardPage({ onLogout }) {
   const { toast } = useToast()
-  const [page, setPage]         = React.useState("accounts") // "accounts" | "generator"
+  const [page, setPage]         = React.useState("accounts")
   const [accounts, setAccounts] = React.useState([])
   const [loading, setLoading]   = React.useState(true)
   const [search, setSearch]     = React.useState("")
@@ -139,13 +138,6 @@ export default function DashboardPage({ onLogout }) {
               >
                 Accounts
               </button>
-              <button
-                onClick={() => setPage("generator")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${page === "generator" ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground hover:bg-secondary"}`}
-              >
-                <Zap className="h-3.5 w-3.5" />
-                Generator
-              </button>
             </nav>
           </div>
           <Button variant="ghost" size="sm" onClick={logout}>
@@ -155,9 +147,6 @@ export default function DashboardPage({ onLogout }) {
       </header>
 
       <main className="max-w-6xl mx-auto px-4 py-8">
-
-        {/* ── GENERATOR PAGE ── */}
-        {page === "generator" && <Generator />}
 
         {/* ── ACCOUNTS PAGE ── */}
         {page === "accounts" && (
