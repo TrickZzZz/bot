@@ -41,6 +41,13 @@ setup_warp() {
 
     warp-cli --accept-tos mode proxy || return 1
     warp-cli --accept-tos proxy port 40000 || return 1
+
+    # Proxy mode only supports MASQUE — a previous experiment set this to
+    # WireGuard, and that setting persisted on the volume just like the
+    # device registration does. Force it back explicitly every boot rather
+    # than assuming it defaults to MASQUE.
+    warp-cli --accept-tos tunnel protocol set MASQUE || true
+
     warp-cli --accept-tos connect || return 1
     return 0
 }
