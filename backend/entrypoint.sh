@@ -120,10 +120,24 @@ fi
 # background alongside uvicorn; every check and reconnect attempt is logged
 # so it's visible in Railway's log tail.
 (
+    check_count=0
     while true; do
-        sleep 120
+        sleep 60
+        check_count=$((check_count + 1))
         if test_warp_proxy; then
-            : # still (or again) working — nothing to do
+            # Proactively refresh the connection periodically even when
+            # currently healthy (roughly every 30 min). We've directly
+            # observed that once a connection lands on a bad path, it tends
+            # to stay bad for its whole lifetime rather than self-correcting
+            # — a fresh reconnect gives Cloudflare's routing another chance
+            # to land somewhere better, rather than only reconnecting after
+            # an outright failure.
+            if [ $((check_count % 30)) -eq 0 ]; then
+                echo "[warp-watchdog] periodic proactive refresh (currently healthy)..."
+                warp-cli --accept-tos disconnect >/dev/null 2>&1
+                sleep 2
+                warp-cli --accept-tos connect >/dev/null 2>&1
+            fi
         else
             echo "[warp-watchdog] proxy not responding — attempting reconnect..."
             warp-cli --accept-tos connect >/dev/null 2>&1
@@ -131,7 +145,7 @@ fi
             if test_warp_proxy; then
                 echo "[warp-watchdog] reconnect succeeded — WARP is usable again"
             else
-                echo "[warp-watchdog] reconnect did not restore a working proxy — will check again in 2 minutes"
+                echo "[warp-watchdog] reconnect did not restore a working proxy — will check again in 60s"
             fi
         fi
     done
