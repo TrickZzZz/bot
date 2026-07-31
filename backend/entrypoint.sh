@@ -13,21 +13,30 @@ sleep 2
 setup_warp() {
     # /var/lib/cloudflare-warp should be a persistent Railway Volume. Without
     # one, every container restart registers as a brand-new device — quietly
-    # burning through the 5-device WARP+ license limit. With the volume in
-    # place, this check finds the SAME registration across restarts and
-    # skips creating a new device entirely.
-    if warp-cli --accept-tos registration show >/dev/null 2>&1; then
-        echo "[entrypoint] existing WARP registration found on persistent volume — reusing it"
-    else
-        echo "[entrypoint] no existing registration — registering as a new device (uses one WARP+ device slot, one time only if the volume persists)"
-        warp-cli --accept-tos registration new || return 1
+    # burning through the 5-device WARP+ license limit.
+    #
+    # Rather than pre-checking whether a registration already exists (which
+    # proved unreliable — warp-cli's own state isn't always ready to answer
+    # that immediately after startup), just attempt registration directly.
+    # If one already exists on the persisted volume, warp-cli tells us so
+    # with a specific, recognizable message — treat that as success (reuse
+    # the existing device) rather than as a failure.
+    reg_output=$(warp-cli --accept-tos registration new 2>&1)
+    reg_status=$?
 
+    if [ $reg_status -eq 0 ]; then
+        echo "[entrypoint] registered as a new device (uses one WARP+ device slot, one time only if the volume persists)"
         if [ -n "$ROBLOX_WARP_LICENSE_KEY" ]; then
             echo "[entrypoint] applying WARP+ license..."
             warp-cli --accept-tos registration license "$ROBLOX_WARP_LICENSE_KEY" || true
         else
             echo "[entrypoint] no ROBLOX_WARP_LICENSE_KEY set — running on free tier"
         fi
+    elif echo "$reg_output" | grep -qi "Old registration is still around"; then
+        echo "[entrypoint] existing WARP registration found on persistent volume — reusing it, no device slot used"
+    else
+        echo "[entrypoint] registration failed: $reg_output"
+        return 1
     fi
 
     warp-cli --accept-tos mode proxy || return 1
