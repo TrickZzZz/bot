@@ -29,7 +29,7 @@ setup_warp() {
 if setup_warp; then
     echo "[entrypoint] WARP configured — waiting for connection..."
     connected=0
-    for i in $(seq 1 20); do
+    for i in $(seq 1 60); do
         if warp-cli --accept-tos status 2>/dev/null | grep -qi "Connected"; then
             echo "[entrypoint] WARP connected on 127.0.0.1:40000"
             connected=1
@@ -38,7 +38,7 @@ if setup_warp; then
         sleep 1
     done
     if [ "$connected" -eq 0 ]; then
-        echo "[entrypoint] WARP did not report Connected within 20s — continuing without it"
+        echo "[entrypoint] WARP did not report Connected within 60s — continuing without it"
         echo "[entrypoint] --- warp-cli status (full output) ---"
         warp-cli --accept-tos status 2>&1 || echo "[entrypoint] (status command itself failed)"
         echo "[entrypoint] --- warp-svc.log (last 40 lines) ---"
