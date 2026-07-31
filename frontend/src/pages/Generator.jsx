@@ -6,7 +6,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import {
   Zap, Play, Square, BarChart3, Search, Trash2, RotateCcw,
   Clock, KeyRound, CheckCircle2, XCircle, AlertCircle, Circle,
-  ShieldCheck, Settings2, Users, UserCog,
+  ShieldCheck, Settings2, Users, UserCog, Wifi,
 } from "lucide-react"
 
 var STATUS_COLOR = {
@@ -132,6 +132,8 @@ export default function Generator() {
   var accountsState = React.useState([]); var accounts = accountsState[0]; var setAccounts = accountsState[1]
   var limitsState = React.useState(null); var limits = limitsState[0]; var setLimits = limitsState[1]
   var usersState = React.useState([]); var usersList = usersState[0]; var setUsersList = usersState[1]
+  var warpCheckingState = React.useState(false); var warpChecking = warpCheckingState[0]; var setWarpChecking = warpCheckingState[1]
+  var warpResultState = React.useState(null); var warpResult = warpResultState[0]; var setWarpResult = warpResultState[1]
   var tabState = React.useState("feed"); var tab = tabState[0]; var setTab = tabState[1]
   var searchState = React.useState(""); var search = searchState[0]; var setSearch = searchState[1]
   var cfgState = React.useState(null); var cfg = cfgState[0]; var setCfg = cfgState[1]
@@ -270,6 +272,18 @@ export default function Generator() {
         "Failed: " + result.failed
       )
     }).catch(function(e) { alert("Error: " + e.message) })
+  }
+
+  function handleCheckWarp() {
+    setWarpChecking(true)
+    setWarpResult(null)
+    gapi("/admin/warp-status").then(function(result) {
+      setWarpResult(result)
+      setWarpChecking(false)
+    }).catch(function(e) {
+      setWarpResult({connected: false, detail: e.message})
+      setWarpChecking(false)
+    })
   }
 
   function clearAccountsList() {
@@ -645,8 +659,24 @@ export default function Generator() {
           React.createElement(Button, {size:"sm", variant:"outline", onClick:handleMigrateEncryption, className:"gap-1.5"},
             React.createElement(ShieldCheck, {className:"h-3.5 w-3.5"}), "Fix corrupted Account Manager passwords"
           ),
-          React.createElement("p", {className:"text-xs text-muted-foreground mt-2"},
+          React.createElement("p", {className:"text-xs text-muted-foreground mt-2 mb-4"},
             "Re-encrypts any account in the top-level Account Manager whose password was stored as plaintext by mistake. Safe to run more than once."
+          ),
+          React.createElement("div", {className:"flex items-center gap-3"},
+            React.createElement(Button, {size:"sm", variant:"outline", disabled:warpChecking, onClick:handleCheckWarp, className:"gap-1.5"},
+              React.createElement(Wifi, {className:"h-3.5 w-3.5"}), warpChecking ? "Checking..." : "Check WARP status"
+            ),
+            warpResult && React.createElement("span", {
+              className: "text-sm flex items-center gap-1.5 " + (warpResult.connected ? "text-emerald-400" : "text-amber-400")
+            },
+              warpResult.connected
+                ? React.createElement(CheckCircle2, {className:"h-3.5 w-3.5"})
+                : React.createElement(AlertCircle, {className:"h-3.5 w-3.5"}),
+              warpResult.connected ? "Connected (" + warpResult.detail + ")" : "Not connected — using residential proxy fallback"
+            )
+          ),
+          React.createElement("p", {className:"text-xs text-muted-foreground mt-2"},
+            "Tests WARP right now, live — not whether it connected at container boot. A boot that failed can recover on its own later, and vice versa."
           )
         )
       )
