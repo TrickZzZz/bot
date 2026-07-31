@@ -448,6 +448,80 @@ def _get_proxy_opener():
             _proxy_opener = urllib.request.build_opener(handler)
     return _proxy_opener
 
+# WARP (Cloudflare) local SOCKS5 proxy — see entrypoint.sh, which starts
+# warp-svc in proxy mode listening on this host:port. Entirely best-effort:
+# if warp-svc never connected at container boot, requests through this
+# opener will simply fail with a connection error, and callers using
+# use_proxy=True will get that failure surfaced like any other network
+# error — nothing here assumes WARP is guaranteed to be up.
+WARP_PROXY_HOST = os.environ.get("WARP_PROXY_HOST", "127.0.0.1").strip()
+WARP_PROXY_PORT = int(os.environ.get("WARP_PROXY_PORT", "40000") or 40000)
+WARP_ENABLED = os.environ.get("ROBLOX_USE_WARP", "").strip().lower() in ("1", "true", "yes")
+
+_warp_opener: Optional["urllib.request.OpenerDirector"] = None
+_warp_opener_lock = threading.Lock()
+
+def _get_warp_opener():
+    """Build (once) and cache a urllib opener routed through the local WARP
+    SOCKS5 proxy. Scoped to this opener only — does NOT globally monkey-patch
+    the socket module, so nothing else in the process is affected even if
+    this is used heavily."""
+    global _warp_opener
+    if _warp_opener is not None:
+        return _warp_opener
+    with _warp_opener_lock:
+        if _warp_opener is None:
+            import socks
+            import http.client
+
+            class _WarpHTTPSConnection(http.client.HTTPSConnection):
+                def connect(self):
+                    sock = socks.socksocket()
+                    # rdns=True routes DNS resolution through the proxy too —
+                    # the socks5h:// equivalent, matching WARP's "HTTP + DNS"
+                    # proxy mode rather than just tunnelling the connection.
+                    sock.set_proxy(socks.SOCKS5, WARP_PROXY_HOST, WARP_PROXY_PORT, rdns=True)
+                    sock.settimeout(self.timeout)
+                    sock.connect((self.host, self.port))
+                    self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+            class _WarpHTTPConnection(http.client.HTTPConnection):
+                def connect(self):
+                    sock = socks.socksocket()
+                    sock.set_proxy(socks.SOCKS5, WARP_PROXY_HOST, WARP_PROXY_PORT, rdns=True)
+                    sock.settimeout(self.timeout)
+                    sock.connect((self.host, self.port))
+                    self.sock = sock
+
+            class _WarpHTTPSHandler(urllib.request.HTTPSHandler):
+                def https_open(self, req):
+                    return self.do_open(_WarpHTTPSConnection, req)
+
+            class _WarpHTTPHandler(urllib.request.HTTPHandler):
+                def http_open(self, req):
+                    return self.do_open(_WarpHTTPConnection, req)
+
+            _warp_opener = urllib.request.build_opener(_WarpHTTPSHandler, _WarpHTTPHandler)
+    return _warp_opener
+
+
+def _get_active_proxy_opener():
+    """Whatever opener 'use_proxy=True' should actually mean right now.
+    WARP transparently takes over from the residential proxy when enabled —
+    every existing use_proxy=True call site in the escalation chain benefits
+    automatically, with zero changes needed outside this function. Falls
+    back to the residential proxy if WARP isn't enabled or fails to build
+    (e.g. PySocks not installed), and to no proxy at all if neither is
+    configured."""
+    if WARP_ENABLED:
+        try:
+            return _get_warp_opener()
+        except Exception as e:
+            _flog(f"WARP opener unavailable, falling back: {e}")
+    if PROXY_URL:
+        return _get_proxy_opener()
+    return None
+
 def _http(
     method: str,
     url: str,
@@ -474,17 +548,18 @@ def _http(
             hdrs.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=data, headers=hdrs, method=method.upper())
     try:
-        if use_proxy and PROXY_URL:
-            opener = _get_proxy_opener()
-            with opener.open(req, timeout=timeout) as resp:
-                raw = resp.read()
-                text = raw.decode("utf-8", errors="replace")
-                out_headers = {k.lower(): v for k, v in resp.getheaders()}
-                try:
-                    parsed = json.loads(text) if text else None
-                except json.JSONDecodeError:
-                    parsed = text
-                return resp.status, parsed, out_headers
+        if use_proxy:
+            opener = _get_active_proxy_opener()
+            if opener:
+                with opener.open(req, timeout=timeout) as resp:
+                    raw = resp.read()
+                    text = raw.decode("utf-8", errors="replace")
+                    out_headers = {k.lower(): v for k, v in resp.getheaders()}
+                    try:
+                        parsed = json.loads(text) if text else None
+                    except json.JSONDecodeError:
+                        parsed = text
+                    return resp.status, parsed, out_headers
         with urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx) as resp:
             raw = resp.read()
             text = raw.decode("utf-8", errors="replace")
@@ -981,7 +1056,7 @@ def roblox_login(
             method="POST",
         )
         try:
-            opener = _get_proxy_opener() if (use_proxy and PROXY_URL) else None
+            opener = _get_active_proxy_opener() if use_proxy else None
             opened = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
             with opened as resp:
                 all_headers = resp.getheaders()
@@ -1074,7 +1149,7 @@ def provider_change_password(
             hdrs["X-CSRF-TOKEN"] = csrf
         req = urllib.request.Request(url, data=body_json, headers=hdrs, method="POST")
         try:
-            opener = _get_proxy_opener() if (use_proxy and PROXY_URL) else None
+            opener = _get_active_proxy_opener() if use_proxy else None
             opened = opener.open(req, timeout=timeout) if opener else urllib.request.urlopen(req, timeout=timeout, context=ssl_ctx)
             with opened as resp:
                 return (True, "" if resp.status in (200, 204) else f"http-{resp.status}", None)
@@ -1384,11 +1459,12 @@ class GeneratorWorker:
                     _flog(f"pw change [1:cookie] ok={ok} reason={reason}")
 
                     # Step 2: same cookie, same request, routed through the residential
-                    # proxy instead. No new login — just a cleaner exit IP, in case
-                    # Roblox specifically distrusts Railway's address rather than the
-                    # cookie itself being stale.
-                    if not ok and reason and PROXY_URL and ("9002" in reason or "authenticat" in reason.lower()):
-                        _flog(f"pw change auth failure — retrying via proxy for {user}")
+                    # proxy instead. No new login — just a cleaner exit IP. Runs on
+                    # ANY step-1 failure (not just auth-specific errors) whenever a
+                    # proxy is configured, since a cleaner IP can help with more than
+                    # just 9002/not-authenticated responses.
+                    if not ok and PROXY_URL:
+                        _flog(f"pw change step 1 failed — retrying via proxy for {user}")
                         ok, reason2 = provider_change_password(cookie, old_pw, new_password, ssl_ctx, use_proxy=True)
                         _flog(f"pw change [2:cookie+proxy] ok={ok} reason={reason2}")
                         if ok:
