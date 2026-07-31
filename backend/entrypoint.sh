@@ -11,13 +11,23 @@ warp-svc >/var/log/warp-svc.log 2>&1 &
 sleep 2
 
 setup_warp() {
-    warp-cli --accept-tos registration new || return 1
-
-    if [ -n "$ROBLOX_WARP_LICENSE_KEY" ]; then
-        echo "[entrypoint] applying WARP+ license..."
-        warp-cli --accept-tos registration license "$ROBLOX_WARP_LICENSE_KEY" || true
+    # /var/lib/cloudflare-warp should be a persistent Railway Volume. Without
+    # one, every container restart registers as a brand-new device — quietly
+    # burning through the 5-device WARP+ license limit. With the volume in
+    # place, this check finds the SAME registration across restarts and
+    # skips creating a new device entirely.
+    if warp-cli --accept-tos registration show >/dev/null 2>&1; then
+        echo "[entrypoint] existing WARP registration found on persistent volume — reusing it"
     else
-        echo "[entrypoint] no ROBLOX_WARP_LICENSE_KEY set — running on free tier"
+        echo "[entrypoint] no existing registration — registering as a new device (uses one WARP+ device slot, one time only if the volume persists)"
+        warp-cli --accept-tos registration new || return 1
+
+        if [ -n "$ROBLOX_WARP_LICENSE_KEY" ]; then
+            echo "[entrypoint] applying WARP+ license..."
+            warp-cli --accept-tos registration license "$ROBLOX_WARP_LICENSE_KEY" || true
+        else
+            echo "[entrypoint] no ROBLOX_WARP_LICENSE_KEY set — running on free tier"
+        fi
     fi
 
     warp-cli --accept-tos mode proxy || return 1
@@ -27,18 +37,24 @@ setup_warp() {
 }
 
 if setup_warp; then
-    echo "[entrypoint] WARP configured — waiting for connection..."
-    connected=0
+    echo "[entrypoint] WARP configured — testing whether the proxy actually works..."
+    proxy_working=0
     for i in $(seq 1 60); do
-        if warp-cli --accept-tos status 2>/dev/null | grep -qi "Connected"; then
-            echo "[entrypoint] WARP connected on 127.0.0.1:40000"
-            connected=1
+        # Test the ACTUAL thing we need — can a real request reach Cloudflare
+        # through 127.0.0.1:40000 — rather than trusting warp-cli's own
+        # internal "Connected" status, which depends on a separate internal
+        # self-check that can fail/timeout for unrelated reasons even when
+        # the proxy itself is perfectly usable.
+        trace=$(curl --socks5-hostname 127.0.0.1:40000 -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+        if echo "$trace" | grep -qE "warp=(plus|on)"; then
+            echo "[entrypoint] WARP proxy confirmed working on 127.0.0.1:40000 ($(echo "$trace" | grep '^warp='))"
+            proxy_working=1
             break
         fi
         sleep 1
     done
-    if [ "$connected" -eq 0 ]; then
-        echo "[entrypoint] WARP did not report Connected within 60s — continuing without it"
+    if [ "$proxy_working" -eq 0 ]; then
+        echo "[entrypoint] proxy did not confirm working within 60s — continuing without it"
         echo "[entrypoint] --- warp-cli status (full output) ---"
         warp-cli --accept-tos status 2>&1 || echo "[entrypoint] (status command itself failed)"
         echo "[entrypoint] --- warp-svc.log (last 40 lines) ---"
