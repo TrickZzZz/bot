@@ -26,6 +26,7 @@ from .generator_core import (
     _get_keys, _secure_load, make_ssl_context, _http,
     bloxgen_daily_limit, bloxgen_stock,
     filter_accounts, load_accounts,
+    check_warp_status,
 )
 
 router = APIRouter(prefix="/generator", tags=["generator"])
@@ -51,6 +52,16 @@ def list_users(_=Depends(require_admin), db: Session = Depends(get_db)):
         out.append(entry)
     out.sort(key=lambda e: e["username"].lower())
     return out
+
+
+@router.get("/admin/warp-status")
+def warp_status(_=Depends(require_admin)):
+    """Live check of whether WARP is usable RIGHT NOW — not whether it
+    connected at container boot. A boot that failed can recover on its own
+    later, and a boot that succeeded can degrade — this always reflects the
+    current moment, which is what actually matters before relying on it."""
+    connected, detail = check_warp_status()
+    return {"connected": connected, "detail": detail}
 
 
 def _format_vault_date(raw) -> str:

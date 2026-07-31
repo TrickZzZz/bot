@@ -522,6 +522,31 @@ def _get_active_proxy_opener():
         return _get_proxy_opener()
     return None
 
+
+def check_warp_status(timeout: float = 8.0) -> Tuple[bool, str]:
+    """Live test of whether WARP is actually usable RIGHT NOW — not whether
+    it connected at container boot (that can change: a boot that failed can
+    recover, and a boot that succeeded can later degrade). Makes a real
+    request through the local WARP SOCKS5 proxy to Cloudflare's own trace
+    endpoint, exactly like entrypoint.sh's own startup check, but callable
+    on demand from the running app."""
+    if not WARP_ENABLED:
+        return False, "WARP not enabled (ROBLOX_USE_WARP is not set)"
+    try:
+        opener = _get_warp_opener()
+    except Exception as e:
+        return False, f"WARP opener could not be built: {e}"
+    try:
+        req = urllib.request.Request("https://cloudflare.com/cdn-cgi/trace")
+        with opener.open(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        warp_line = next((l for l in body.splitlines() if l.startswith("warp=")), "")
+        if warp_line in ("warp=on", "warp=plus"):
+            return True, warp_line
+        return False, f"proxy responded but not via WARP ({warp_line or 'no warp= line found'})"
+    except Exception as e:
+        return False, f"request through WARP proxy failed: {e}"
+
 def _http(
     method: str,
     url: str,
