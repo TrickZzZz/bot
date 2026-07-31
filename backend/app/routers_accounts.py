@@ -12,10 +12,19 @@ router = APIRouter(prefix="/accounts", tags=["accounts"])
 
 
 def _to_out(acc: models.Account) -> schemas.AccountOut:
+    try:
+        pw = decrypt_secret(acc.password)
+    except Exception:
+        # This row's password isn't valid Fernet ciphertext — almost certainly
+        # stored as plaintext during the earlier broken deploy that skipped
+        # encryption. Surface it clearly instead of crashing the whole list;
+        # re-saving this account's password through the (now-fixed) update
+        # endpoint will re-encrypt it correctly and clear this up.
+        pw = "⚠ corrupted — re-save this account's password"
     return schemas.AccountOut(
         id=acc.id,
         username=acc.username,
-        password=decrypt_secret(acc.password),
+        password=pw,
         created_at=acc.created_at,
         updated_at=acc.updated_at,
     )
