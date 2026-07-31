@@ -247,6 +247,31 @@ export default function Generator() {
     gapi("/admin/users").then(setUsersList).catch(function(){})
   }
 
+  function handleMigrateEncryption() {
+    if (!confirm(
+      "Fix corrupted passwords in the Account Manager?\n\n" +
+      "This re-encrypts any account whose password was stored as plaintext by mistake. " +
+      "Accounts already encrypted correctly are left untouched. Safe to run more than once.\n\n" +
+      "Continue?"
+    )) return
+    var token = localStorage.getItem("am_access_token")
+    fetch(API_BASE + "/accounts/migrate-encryption", {
+      method: "POST",
+      headers: {Authorization: "Bearer " + token}
+    }).then(function(r) {
+      if (!r.ok) return r.text().then(function(t) { throw new Error(t) })
+      return r.json()
+    }).then(function(result) {
+      alert(
+        "Done.\n\n" +
+        "Total accounts: " + result.total + "\n" +
+        "Already encrypted: " + result.already_encrypted + "\n" +
+        "Fixed just now: " + result.migrated + "\n" +
+        "Failed: " + result.failed
+      )
+    }).catch(function(e) { alert("Error: " + e.message) })
+  }
+
   function clearAccountsList() {
     if (!confirm("Hide all current accounts from this view? New accounts you generate will still show. This does NOT delete anything from the vault.")) return
     gapi("/accounts?limit=5000").then(function(all) {
@@ -614,6 +639,15 @@ export default function Generator() {
             ),
         React.createElement("p", {className:"text-xs text-muted-foreground pt-2"},
           "Admin status is set by the ADMIN_USERNAMES environment variable on the server — it can't be changed from here."
+        ),
+        React.createElement("div", {className:"pt-4 mt-2 border-t border-border"},
+          React.createElement("div", {className:"text-xs text-muted-foreground font-medium tracking-wide mb-2"}, "MAINTENANCE"),
+          React.createElement(Button, {size:"sm", variant:"outline", onClick:handleMigrateEncryption, className:"gap-1.5"},
+            React.createElement(ShieldCheck, {className:"h-3.5 w-3.5"}), "Fix corrupted Account Manager passwords"
+          ),
+          React.createElement("p", {className:"text-xs text-muted-foreground mt-2"},
+            "Re-encrypts any account in the top-level Account Manager whose password was stored as plaintext by mistake. Safe to run more than once."
+          )
         )
       )
     )
