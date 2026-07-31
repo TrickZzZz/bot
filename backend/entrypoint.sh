@@ -61,7 +61,7 @@ if setup_warp; then
         # internal "Connected" status, which depends on a separate internal
         # self-check that can fail/timeout for unrelated reasons even when
         # the proxy itself is perfectly usable.
-        trace=$(curl --socks5-hostname 127.0.0.1:40000 -s --max-time 5 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null)
+        trace=$(curl --socks5-hostname 127.0.0.1:40000 -s --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null)
         if echo "$trace" | grep -qE "warp=(plus|on)"; then
             echo "[entrypoint] WARP proxy confirmed working on 127.0.0.1:40000 ($(echo "$trace" | grep '^warp='))"
             proxy_working=1
