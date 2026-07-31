@@ -2,7 +2,6 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from sqlalchemy import or_
 
 from .database import get_db
 from . import models, schemas
@@ -16,7 +15,6 @@ def _to_out(acc: models.Account) -> schemas.AccountOut:
     return schemas.AccountOut(
         id=acc.id,
         username=acc.username,
-        url=acc.url,
         password=decrypt_secret(acc.password),
         created_at=acc.created_at,
         updated_at=acc.updated_at,
@@ -32,9 +30,7 @@ def list_accounts(
     query = db.query(models.Account)
     if search:
         like = f"%{search}%"
-        query = query.filter(
-            or_(models.Account.username.ilike(like), models.Account.url.ilike(like))
-        )
+        query = query.filter(models.Account.username.ilike(like))
     accounts = query.order_by(models.Account.id.asc()).all()
     return [_to_out(a) for a in accounts]
 
@@ -63,7 +59,6 @@ def create_account(
 ):
     acc = models.Account(
         username=payload.username,
-        url=payload.url,
         password=encrypt_secret(payload.password),
     )
     db.add(acc)
@@ -129,7 +124,6 @@ def bulk_import(
         try:
             acc = models.Account(
                 username=item.username,
-                url=item.url,
                 password=encrypt_secret(item.password),
             )
             db.add(acc)
