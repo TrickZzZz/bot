@@ -396,8 +396,11 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, us
             for a in mine[:limit]
         ]
 
+    admin_username = str(getattr(user, "username", "")).strip().lower()
+    admin_prefs = _get_user_prefs(admin_username)
+
     try:
-        ssl_ctx = make_ssl_context(bool(_session.cfg.get("ssl_verify", True)))
+        ssl_ctx = make_ssl_context(bool(admin_prefs.get("ssl_verify", True)))
         v = Vault(
             str(_session.cfg["vault_api"]),
             str(_session.cfg["vault_user"]),
@@ -421,7 +424,7 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, us
         # deterministically: does this account's current password already
         # match the configured target? If new_password isn't set, fall back
         # to the vault's own flag (if it happens to exist) as a soft signal.
-        configured_new_pw = str(_session.cfg.get("new_password") or "").strip()
+        configured_new_pw = str(admin_prefs.get("new_password") or "").strip()
 
         accounts = []
         for a in raw:
@@ -458,7 +461,7 @@ def get_accounts(search: str = "", account_type: str = "", limit: int = 1000, us
 
 
 @router.post("/accounts/change-passwords")
-def change_unchanged_passwords(_=Depends(require_admin)):
+def change_unchanged_passwords(user=Depends(require_admin)):
     """Bulk password change for vault accounts that haven't been changed yet.
 
     Each account needs a fresh Roblox login (no cookie is stored in the vault
@@ -470,7 +473,8 @@ def change_unchanged_passwords(_=Depends(require_admin)):
     if _session.is_running():
         raise HTTPException(400, "Another job is already running")
 
-    new_password = str(_session.cfg.get("new_password") or "").strip()
+    username = str(getattr(user, "username", "")).strip().lower()
+    new_password = str(_get_user_prefs(username).get("new_password") or "").strip()
     if len(new_password) < 8:
         raise HTTPException(400, "Set a new password (8+ chars) in Config first")
 
@@ -482,7 +486,7 @@ def change_unchanged_passwords(_=Depends(require_admin)):
     def run():
         from .generator_core import roblox_login, provider_change_password
         try:
-            ssl_ctx = make_ssl_context(bool(_session.cfg.get("ssl_verify", True)))
+            ssl_ctx = make_ssl_context(bool(_get_user_prefs(username).get("ssl_verify", True)))
             v = Vault(
                 str(_session.cfg["vault_api"]),
                 str(_session.cfg["vault_user"]),
