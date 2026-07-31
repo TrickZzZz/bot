@@ -41,15 +41,6 @@ setup_warp() {
 
     warp-cli --accept-tos mode proxy || return 1
     warp-cli --accept-tos proxy port 40000 || return 1
-
-    # MASQUE (the default protocol) showed 95% packet loss on this network —
-    # technically "Connected" per warp-cli's own status, but practically
-    # unusable for real traffic. WireGuard is a structurally different
-    # transport; worth trying since it may behave completely differently
-    # on this specific network path. Non-fatal if this command itself
-    # isn't supported by this warp-cli version — falls through to MASQUE.
-    warp-cli --accept-tos tunnel protocol set WireGuard 2>&1 || echo "[entrypoint] could not switch to WireGuard protocol — continuing with default"
-
     warp-cli --accept-tos connect || return 1
     return 0
 }
