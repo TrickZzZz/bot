@@ -8,15 +8,38 @@ import time
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base
+from cryptography.fernet import Fernet, InvalidToken
 
 load_dotenv()
 
 TOKEN = os.environ.get("TOKEN")
 VOICE_CHANNEL_ID = int(os.environ.get("VOICE_CHANNEL_ID", "1521166172182024475"))
 
+# ── Encryption (matches backend/app/security.py exactly) ──────────
+# Stored account passwords are encrypted at rest with Fernet, not plaintext —
+# this bot must decrypt them the same way the web app's own API does before
+# ever showing one to a user.
+ENCRYPTION_KEY = os.environ.get("ACCOUNT_ENCRYPTION_KEY")
+if not ENCRYPTION_KEY:
+    raise RuntimeError(
+        "ACCOUNT_ENCRYPTION_KEY environment variable is required (same key "
+        "used by the web app's backend — accounts are encrypted with it)."
+    )
+_fernet = Fernet(ENCRYPTION_KEY.encode() if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY)
+
+
+def decrypt_secret(token: str) -> str:
+    """Decrypt a stored password. Falls back to a clear placeholder instead
+    of crashing if a row somehow isn't valid Fernet ciphertext (e.g. a
+    leftover from before encryption was correctly wired in everywhere)."""
+    try:
+        return _fernet.decrypt(token.encode()).decode()
+    except (InvalidToken, AttributeError, ValueError):
+        return "⚠ corrupted — could not decrypt this password"
+
+
 # ── Cooldown config ───────────────────────────────────────────────
 COOLDOWN_ROLES_PATH = os.path.join(os.path.dirname(__file__), "cooldown_roles.json")
-
 
 def load_cooldown_roles():
     """Load the {role_id: cooldown_seconds} mapping from disk."""
@@ -29,16 +52,13 @@ def load_cooldown_roles():
         print(f"[!] Could not load cooldown roles: {e}")
         return {}
 
-
 COOLDOWN_ROLES = load_cooldown_roles()
 
 # Maps a Discord user ID to the UNIX timestamp (seconds) when their cooldown ends.
 active_cooldowns = {}
 
-
 def get_user_cooldown(member):
     """Return the lowest cooldown (in seconds) among the roles a member has.
-
     A lower cooldown means a more privileged role wins. Returns None if the
     member has no configured cooldown role.
     """
@@ -49,10 +69,8 @@ def get_user_cooldown(member):
     ]
     return min(cooldowns) if cooldowns else None
 
-
 def get_remaining_cooldown(user_id):
     """Return seconds left on a user's cooldown, or 0 if none is active.
-
     Expired cooldowns are cleaned up so the user can run the command again.
     """
     ends_at = active_cooldowns.get(user_id)
@@ -75,10 +93,8 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-
 def utcnow():
     return datetime.now(timezone.utc)
-
 
 def count_alts():
     """Return the current number of stocked alts in the database."""
@@ -88,21 +104,17 @@ def count_alts():
     finally:
         db.close()
 
-
 class Account(Base):
     """A registered third-party account (the thing being managed)."""
     __tablename__ = "accounts"
-
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(150), nullable=False)
     password = Column(String(500), nullable=False)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
-
 # Create tables if they don't exist
 Base.metadata.create_all(bind=engine)
-
 
 # ── Discord Bot ──────────────────────────────────────────────────
 class CredBot(discord.Client):
@@ -117,7 +129,6 @@ class CredBot(discord.Client):
     async def on_ready(self):
         total = count_alts()
         print(f"[*] Bot is ready. {total} accounts in database.")
-
         # Update the channel name on startup and keep it refreshed every 30 min.
         await self.update_alt_count_channel()
         if not self.refresh_alt_count.is_running():
@@ -153,9 +164,7 @@ class CredBot(discord.Client):
     async def before_refresh_alt_count(self):
         await self.wait_until_ready()
 
-
 client = CredBot()
-
 
 def format_duration(seconds):
     """Human-friendly duration, e.g. 90 -> '1m 30s'."""
@@ -170,7 +179,6 @@ def format_duration(seconds):
     if secs or not parts:
         parts.append(f"{secs}s")
     return " ".join(parts)
-
 
 @client.tree.command(name="creds", description="Get and delete the next credential from the database")
 async def creds_command(interaction: discord.Interaction):
@@ -189,12 +197,12 @@ async def creds_command(interaction: discord.Interaction):
     try:
         # Fetch the oldest account (FIFO)
         account = db.query(Account).order_by(Account.id.asc()).first()
-
         if not account:
             await interaction.response.send_message("No more credentials left.", ephemeral=True)
             return
 
-        msg = f"```\nusername: {account.username}\npassword: {account.password}\n```\n-# Save the account! It will get deleted in 15 minutes."
+        plain_password = decrypt_secret(account.password)
+        msg = f"```\nusername: {account.username}\npassword: {plain_password}\n```\n-# Save the account! It will get deleted in 15 minutes."
 
         # Delete it after sending
         db.delete(account)
@@ -220,6 +228,5 @@ async def creds_command(interaction: discord.Interaction):
         raise
     finally:
         db.close()
-
 
 client.run(TOKEN)
