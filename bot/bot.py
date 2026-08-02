@@ -268,14 +268,11 @@ def format_duration(seconds):
         parts.append(f"{secs}s")
     return " ".join(parts)
 
-TYPE_CHOICES = [app_commands.Choice(name=t, value=t) for t in ACCOUNT_TYPES]
-
-@client.tree.command(name="creds", description="Get and delete the next credential from the database")
-@app_commands.describe(account_type="Which account type do you want?")
-@app_commands.choices(account_type=TYPE_CHOICES)
-async def creds_command(interaction: discord.Interaction, account_type: app_commands.Choice[str]):
+async def _handle_generate(interaction: discord.Interaction, requested_type: str):
+    """Shared logic for every /generate subcommand — permission check,
+    cooldown, fetch, decrypt, delete, respond. Each subcommand below is
+    just a thin wrapper that calls this with its own fixed type."""
     user_id = interaction.user.id
-    requested_type = account_type.value
 
     # Role-based permission check — normal users only get DEFAULT_TYPES;
     # specific roles unlock premium types on top (see type_roles.json).
@@ -340,5 +337,18 @@ async def creds_command(interaction: discord.Interaction, account_type: app_comm
         raise
     finally:
         db.close()
+
+
+generate_group = app_commands.Group(name="generate", description="Get and delete the next credential from the database")
+
+@generate_group.command(name="30d", description="Get a +30 days old account")
+async def generate_30d(interaction: discord.Interaction):
+    await _handle_generate(interaction, "+30 days old")
+
+@generate_group.command(name="1y", description="Get a +1 year old account")
+async def generate_1y(interaction: discord.Interaction):
+    await _handle_generate(interaction, "+1 year old")
+
+client.tree.add_command(generate_group)
 
 client.run(TOKEN)
