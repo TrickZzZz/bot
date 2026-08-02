@@ -27,5 +27,6 @@ class Account(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(150), nullable=False)
     password = Column(String(500), nullable=False)
+    account_type = Column(String(50), nullable=True, default="+30 days old")
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
