@@ -1,4 +1,5 @@
 from typing import List
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -21,13 +22,19 @@ def _to_out(acc: models.Account) -> schemas.AccountOut:
         # re-saving this account's password through the (now-fixed) update
         # endpoint will re-encrypt it correctly and clear this up.
         pw = "⚠ corrupted — re-save this account's password"
+
+    # Some older rows predate created_at/updated_at having a real default —
+    # a NULL here would otherwise crash AccountOut's construction (these
+    # fields aren't Optional), taking down the ENTIRE list for every other
+    # account too. Substitute a sane fallback instead of failing the row.
+    now = datetime.now(timezone.utc)
     return schemas.AccountOut(
         id=acc.id,
         username=acc.username,
         password=pw,
         account_type=acc.account_type,
-        created_at=acc.created_at,
-        updated_at=acc.updated_at,
+        created_at=acc.created_at or now,
+        updated_at=acc.updated_at or now,
     )
 
 
@@ -45,7 +52,16 @@ def list_accounts(
     if account_type:
         query = query.filter(models.Account.account_type == account_type)
     accounts = query.order_by(models.Account.id.asc()).all()
-    return [_to_out(a) for a in accounts]
+    out = []
+    for a in accounts:
+        try:
+            out.append(_to_out(a))
+        except Exception as e:
+            # Belt-and-suspenders: whatever this specific row's problem is,
+            # it should never be able to take down the list for every other
+            # account too. Skip it and keep going.
+            print(f"[!] Skipping account id={getattr(a, 'id', '?')} in list_accounts — {e}")
+    return out
 
 
 @router.get("/{account_id}", response_model=schemas.AccountOut)
