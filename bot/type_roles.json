@@ -1,0 +1,6 @@
+{
+  "_comment": "Maps a Discord role ID to the list of account types that role unlocks, ON TOP of the DEFAULT_TYPES every user gets automatically. A user's final allowed set is the UNION across every role they hold. Replace these example role IDs with your real ones.",
+  "123456789012345678": ["+1 year old"],
+  "123456789012345679": ["+1 year old", "5+ years old"],
+  "123456789012345680": ["+1 year old", "5+ years old", "dump"]
+}
