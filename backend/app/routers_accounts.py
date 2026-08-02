@@ -25,6 +25,7 @@ def _to_out(acc: models.Account) -> schemas.AccountOut:
         id=acc.id,
         username=acc.username,
         password=pw,
+        account_type=acc.account_type,
         created_at=acc.created_at,
         updated_at=acc.updated_at,
     )
@@ -33,6 +34,7 @@ def _to_out(acc: models.Account) -> schemas.AccountOut:
 @router.get("", response_model=List[schemas.AccountOut])
 def list_accounts(
     search: str = "",
+    account_type: str = "",
     _=Depends(require_admin),
     db: Session = Depends(get_db),
 ):
@@ -40,6 +42,8 @@ def list_accounts(
     if search:
         like = f"%{search}%"
         query = query.filter(models.Account.username.ilike(like))
+    if account_type:
+        query = query.filter(models.Account.account_type == account_type)
     accounts = query.order_by(models.Account.id.asc()).all()
     return [_to_out(a) for a in accounts]
 
@@ -69,6 +73,7 @@ def create_account(
     acc = models.Account(
         username=payload.username,
         password=encrypt_secret(payload.password),
+        account_type=payload.account_type,
     )
     db.add(acc)
     db.commit()
@@ -134,6 +139,7 @@ def bulk_import(
             acc = models.Account(
                 username=item.username,
                 password=encrypt_secret(item.password),
+                account_type=item.account_type,
             )
             db.add(acc)
             db.flush()

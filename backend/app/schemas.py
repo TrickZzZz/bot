@@ -33,6 +33,7 @@ class UserOut(BaseModel):
 class AccountBase(BaseModel):
     username: str = Field(min_length=1, max_length=150)
     url: Optional[str] = Field(default=None, max_length=500)
+    account_type: Optional[str] = Field(default=None, max_length=50)
 
 
 class AccountCreate(AccountBase):
@@ -42,6 +43,7 @@ class AccountCreate(AccountBase):
 class AccountUpdate(BaseModel):
     username: Optional[str] = Field(default=None, min_length=1, max_length=150)
     password: Optional[str] = Field(default=None, min_length=1, max_length=500)
+    account_type: Optional[str] = Field(default=None, max_length=50)
 
 
 class AccountOut(AccountBase):
