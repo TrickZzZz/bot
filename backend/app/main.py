@@ -24,6 +24,9 @@ def ensure_schema_migrations():
             "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS account_type VARCHAR(50)"
         ))
         conn.execute(text(
+            "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cookie VARCHAR(1000)"
+        ))
+        conn.execute(text(
             "UPDATE accounts SET account_type = '+30 days old' WHERE account_type IS NULL"
         ))
         conn.commit()

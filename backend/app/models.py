@@ -28,5 +28,6 @@ class Account(Base):
     username = Column(String(150), nullable=False)
     password = Column(String(500), nullable=False)
     account_type = Column(String(50), nullable=True, default="+30 days old")
+    cookie = Column(String(1000), nullable=True, default=None)
     created_at = Column(DateTime(timezone=True), default=utcnow)
     updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
