@@ -11,19 +11,19 @@ from . import routers_auth, routers_accounts
 
 Base.metadata.create_all(bind=engine)
 
-# Migrate existing databases — add new columns if they don't exist yet
+# Run each migration in its own transaction so a failed one
+# (column already exists) doesn't block the rest — critical for PostgreSQL
 _MIGRATIONS = [
-    "ALTER TABLE accounts ADD COLUMN account_type VARCHAR(100) NOT NULL DEFAULT '+30 days old'",
-    "ALTER TABLE accounts ADD COLUMN cookie TEXT DEFAULT ''",
-    "ALTER TABLE accounts ADD COLUMN region VARCHAR(10) DEFAULT ''",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS account_type VARCHAR(100) NOT NULL DEFAULT '+30 days old'",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cookie TEXT DEFAULT ''",
+    "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS region VARCHAR(10) DEFAULT ''",
 ]
-with engine.connect() as _conn:
-    for _sql in _MIGRATIONS:
-        try:
+for _sql in _MIGRATIONS:
+    try:
+        with engine.begin() as _conn:
             _conn.execute(text(_sql))
-            _conn.commit()
-        except Exception:
-            pass  # Column already exists
+    except Exception:
+        pass  # Column already exists or DB doesn't support IF NOT EXISTS
 
 app = FastAPI(title="DeltaCore Account Manager", version="2.0.0")
 
