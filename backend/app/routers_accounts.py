@@ -5,16 +5,28 @@ from sqlalchemy.orm import Session
 
 from .database import get_db
 from . import models, schemas
+from .security import encrypt_secret, decrypt_secret
 from .deps import get_current_user
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
+
+
+def _decrypt(value: str) -> str:
+    """Decrypt a Fernet-encrypted password. Falls back to plaintext if not encrypted
+    (handles legacy rows or passwords written before encryption was enabled)."""
+    if not value:
+        return value
+    try:
+        return decrypt_secret(value)
+    except Exception:
+        return value  # already plaintext
 
 
 def _to_out(acc: models.Account) -> schemas.AccountOut:
     return schemas.AccountOut(
         id=acc.id,
         username=acc.username,
-        password=acc.password,
+        password=_decrypt(acc.password),
         account_type=acc.account_type or "+30 days old",
         cookie=acc.cookie or "",
         region=acc.region or "",
@@ -31,8 +43,7 @@ def list_accounts(
 ):
     query = db.query(models.Account)
     if search:
-        like = f"%{search}%"
-        query = query.filter(models.Account.username.ilike(like))
+        query = query.filter(models.Account.username.ilike(f"%{search}%"))
     if account_type:
         query = query.filter(models.Account.account_type == account_type)
     return [_to_out(a) for a in query.order_by(models.Account.id.asc()).all()]
@@ -40,7 +51,6 @@ def list_accounts(
 
 @router.get("/types", response_model=List[str])
 def list_types(db: Session = Depends(get_db)):
-    """Return distinct account types present in the database."""
     rows = db.query(models.Account.account_type).distinct().all()
     return sorted({r[0] for r in rows if r[0]})
 
@@ -55,21 +65,19 @@ def get_account(account_id: int, db: Session = Depends(get_db)):
 
 @router.post("", response_model=schemas.AccountOut, status_code=status.HTTP_201_CREATED)
 def create_account(payload: schemas.AccountCreate, db: Session = Depends(get_db)):
-    # Idempotent — return existing account if username already present
     existing = db.query(models.Account).filter(models.Account.username == payload.username).first()
     if existing:
-        # Update fields in case the caller is refreshing a cookie or changing type
-        existing.password     = payload.password
+        existing.password     = encrypt_secret(payload.password)
         existing.account_type = payload.account_type or existing.account_type
-        existing.cookie       = payload.cookie       if payload.cookie is not None else existing.cookie
-        existing.region       = payload.region       if payload.region is not None else existing.region
+        if payload.cookie  is not None: existing.cookie  = payload.cookie
+        if payload.region  is not None: existing.region  = payload.region
         db.commit()
         db.refresh(existing)
         return _to_out(existing)
 
     acc = models.Account(
         username=payload.username,
-        password=payload.password,
+        password=encrypt_secret(payload.password),
         account_type=payload.account_type or "+30 days old",
         cookie=payload.cookie or "",
         region=payload.region or "",
@@ -85,7 +93,10 @@ def update_account(account_id: int, payload: schemas.AccountUpdate, db: Session 
     acc = db.query(models.Account).filter(models.Account.id == account_id).first()
     if not acc:
         raise HTTPException(status_code=404, detail="Account not found")
-    for field, value in payload.model_dump(exclude_unset=True).items():
+    data = payload.model_dump(exclude_unset=True)
+    if "password" in data:
+        data["password"] = encrypt_secret(data["password"])
+    for field, value in data.items():
         setattr(acc, field, value)
     db.commit()
     db.refresh(acc)
@@ -110,7 +121,6 @@ def wipe_all_accounts(
     current_user: models.User = Depends(get_current_user),
     db:           Session     = Depends(get_db),
 ):
-    """Delete every account. Requires auth."""
     db.query(models.Account).delete()
     db.commit()
 
@@ -126,23 +136,22 @@ def bulk_import(
 
     for idx, item in enumerate(payload.accounts):
         try:
-            existing = db.query(models.Account).filter(models.Account.username == item.username).first()
+            encrypted = encrypt_secret(item.password)
+            existing  = db.query(models.Account).filter(models.Account.username == item.username).first()
             if existing:
-                existing.password     = item.password
+                existing.password     = encrypted
                 existing.account_type = item.account_type or existing.account_type
-                existing.cookie       = item.cookie or existing.cookie
-                existing.region       = item.region or existing.region
-                db.flush()
+                if item.cookie: existing.cookie = item.cookie
+                if item.region: existing.region = item.region
             else:
-                acc = models.Account(
+                db.add(models.Account(
                     username=item.username,
-                    password=item.password,
+                    password=encrypted,
                     account_type=item.account_type or "+30 days old",
                     cookie=item.cookie or "",
                     region=item.region or "",
-                )
-                db.add(acc)
-                db.flush()
+                ))
+            db.flush()
             created += 1
         except Exception as e:
             errors.append(f"Row {idx + 1} ({item.username}): {str(e)}")
