@@ -31,10 +31,10 @@ class UserOut(BaseModel):
 
 # --- Accounts ---
 class AccountBase(BaseModel):
-    username: str = Field(min_length=1, max_length=150)
-    url: Optional[str] = Field(default=None, max_length=500)
-    account_type: Optional[str] = Field(default=None, max_length=50)
-    cookie: Optional[str] = Field(default=None, max_length=1000)
+    username:     str           = Field(min_length=1, max_length=150)
+    account_type: str           = Field(default="+30 days old", max_length=100)
+    cookie:       Optional[str] = Field(default="", max_length=2000)
+    region:       Optional[str] = Field(default="", max_length=10)
 
 
 class AccountCreate(AccountBase):
@@ -42,15 +42,16 @@ class AccountCreate(AccountBase):
 
 
 class AccountUpdate(BaseModel):
-    username: Optional[str] = Field(default=None, min_length=1, max_length=150)
-    password: Optional[str] = Field(default=None, min_length=1, max_length=500)
-    account_type: Optional[str] = Field(default=None, max_length=50)
-    cookie: Optional[str] = Field(default=None, max_length=1000)
+    username:     Optional[str] = Field(default=None, min_length=1, max_length=150)
+    password:     Optional[str] = Field(default=None, min_length=1, max_length=500)
+    account_type: Optional[str] = Field(default=None, max_length=100)
+    cookie:       Optional[str] = Field(default=None, max_length=2000)
+    region:       Optional[str] = Field(default=None, max_length=10)
 
 
 class AccountOut(AccountBase):
-    id: int
-    password: str  # decrypted on read for the owner only
+    id:         int
+    password:   str
     created_at: datetime
     updated_at: datetime
 
@@ -58,8 +59,12 @@ class AccountOut(AccountBase):
         from_attributes = True
 
 
-class BulkImportItem(AccountBase):
-    password: str = Field(min_length=1, max_length=500)
+class BulkImportItem(BaseModel):
+    username:     str           = Field(min_length=1, max_length=150)
+    password:     str           = Field(min_length=1, max_length=500)
+    account_type: Optional[str] = Field(default="+30 days old", max_length=100)
+    cookie:       Optional[str] = Field(default="", max_length=2000)
+    region:       Optional[str] = Field(default="", max_length=10)
 
 
 class BulkImportRequest(BaseModel):
@@ -68,5 +73,5 @@ class BulkImportRequest(BaseModel):
 
 class BulkImportResult(BaseModel):
     created: int
-    failed: int
-    errors: List[str] = []
+    failed:  int
+    errors:  List[str] = []
