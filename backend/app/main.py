@@ -9,37 +9,25 @@ load_dotenv()
 from .database import Base, engine
 from . import routers_auth, routers_accounts
 
-
-def ensure_schema_migrations():
-    """One-time, idempotent schema patches for columns added after the
-    accounts table was first created. Base.metadata.create_all() only
-    creates tables that don't exist yet — it does NOT alter an existing
-    table to add a new column, so this fills that gap safely.
-
-    Safe to run on every single startup: ADD COLUMN IF NOT EXISTS is a
-    no-op once the column already exists, and the backfill only touches
-    rows that are still NULL, never overwriting anything already set."""
-    with engine.connect() as conn:
-        conn.execute(text(
-            "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS account_type VARCHAR(50)"
-        ))
-        conn.execute(text(
-            "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cookie VARCHAR(1000)"
-        ))
-        conn.execute(text(
-            "UPDATE accounts SET account_type = '+30 days old' WHERE account_type IS NULL"
-        ))
-        conn.commit()
-
-
 Base.metadata.create_all(bind=engine)
-ensure_schema_migrations()
 
-app = FastAPI(title="Account Manager API", version="1.0.0")
+# Migrate existing databases — add new columns if they don't exist yet
+_MIGRATIONS = [
+    "ALTER TABLE accounts ADD COLUMN account_type VARCHAR(100) NOT NULL DEFAULT '+30 days old'",
+    "ALTER TABLE accounts ADD COLUMN cookie TEXT DEFAULT ''",
+    "ALTER TABLE accounts ADD COLUMN region VARCHAR(10) DEFAULT ''",
+]
+with engine.connect() as _conn:
+    for _sql in _MIGRATIONS:
+        try:
+            _conn.execute(text(_sql))
+            _conn.commit()
+        except Exception:
+            pass  # Column already exists
 
+app = FastAPI(title="DeltaCore Account Manager", version="2.0.0")
 
 ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "http://localhost:5173")
-
 
 app.add_middleware(
     CORSMiddleware,
