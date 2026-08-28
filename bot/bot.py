@@ -282,7 +282,7 @@ async def _handle_generate(interaction: discord.Interaction, requested_type: str
                 f"||```\n{cookie}\n```||"
             )
         else:
-            cookie_block = "\n-# No cookie stored for this account."
+            cookie_block = ""
 
         msg = (
             cred_block
