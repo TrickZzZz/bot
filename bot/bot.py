@@ -6,7 +6,7 @@ import json
 import os
 import time
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -157,6 +157,7 @@ class Account(Base):
     username     = Column(String(150), nullable=False)
     password     = Column(String(500), nullable=False)
     account_type = Column(String(50), nullable=True, default="+30 days old")
+    cookie       = Column(Text, nullable=True, default="")
     created_at   = Column(DateTime(timezone=True), default=utcnow)
     updated_at   = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
@@ -269,15 +270,49 @@ async def _handle_generate(interaction: discord.Interaction, requested_type: str
             return
 
         plain_password = decrypt_secret(account.password)
+        cookie         = account.cookie or ""
+
+        # Build the message — always include credentials, add cookie if present
+        cred_block = f"```\nusername: {account.username}\npassword: {plain_password}\n```"
+
+        if cookie:
+            # Cookie is long — send in a spoiler so it doesn't flood the channel
+            cookie_block = (
+                f"\n**Cookie** (inject with EditThisCookie / Cookie-Editor):\n"
+                f"||```\n{cookie}\n```||"
+            )
+        else:
+            cookie_block = "\n-# No cookie stored for this account."
+
         msg = (
-            f"```\nusername: {account.username}\npassword: {plain_password}\n```\n"
-            f"-# {requested_type} — Save the account! It will get deleted in 15 minutes."
+            cred_block
+            + cookie_block
+            + f"\n-# {requested_type} — Save everything! This will be deleted in 15 minutes."
         )
+
+        # Discord has a 2000 char limit — if cookie makes it too long, send as file
+        if len(msg) > 1900:
+            import io
+            file_content = (
+                f"username: {account.username}\n"
+                f"password: {plain_password}\n"
+                f"cookie: {cookie}\n"
+            )
+            file_obj = io.BytesIO(file_content.encode())
+            discord_file = discord.File(file_obj, filename=f"{account.username}.txt")
+            short_msg = (
+                f"```\nusername: {account.username}\npassword: {plain_password}\n```\n"
+                f"-# Cookie is too long for chat — attached as a file.\n"
+                f"-# {requested_type} — Save everything! Deleted in 15 minutes."
+            )
 
         db.delete(account)
         db.commit()
 
-        await interaction.response.send_message(msg, ephemeral=True)
+        if len(msg) > 1900:
+            await interaction.response.send_message(short_msg, file=discord_file, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
 
         cooldown = get_user_cooldown(interaction.user)
         if cooldown is not None:
