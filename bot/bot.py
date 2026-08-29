@@ -294,18 +294,22 @@ class PanelView(discord.ui.View):
 
 
 def build_panel_embed(counts: dict) -> discord.Embed:
-    def stock(n): return f"**{n:,}** in stock"
+    def row(label, n, premium=False):
+        tag = "  *— premium*" if premium else ""
+        return f"`{label}{tag}` — **{n:,}** in stock"
+
+    lines = "\n".join([
+        row("30 day",  counts.get("+30 days old", 0)),
+        row("1 year",  counts.get("+1 year old",  0)),
+        row("5 year",  counts.get("5+ years old", 0), premium=True),
+        row("Dump",    counts.get("dump",          0), premium=True),
+    ])
+
     embed = discord.Embed(
         title="DeltaCore Vault",
-        description="Select an account type below. A region picker will appear — visible only to you.",
+        description=f"Press a button to claim an account. The region selector is private.\n\u200b\n{lines}",
         color=0x7C3AED,
     )
-    embed.add_field(name="30 day",             value=stock(counts.get("+30 days old", 0)), inline=True)
-    embed.add_field(name="1 year",             value=stock(counts.get("+1 year old",  0)), inline=True)
-    embed.add_field(name="\u200b",             value="\u200b",                             inline=True)
-    embed.add_field(name="5 year *(premium)*", value=stock(counts.get("5+ years old", 0)), inline=True)
-    embed.add_field(name="Dump *(premium)*",   value=stock(counts.get("dump",          0)), inline=True)
-    embed.add_field(name="\u200b",             value="\u200b",                             inline=True)
     embed.set_footer(text="DeltaCore Alt Generator  \u2022  Accounts are deleted after delivery")
     return embed
 
