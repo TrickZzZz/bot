@@ -283,48 +283,30 @@ class PanelView(discord.ui.View):
         await self._show_region_picker(interaction, "+1 year old")
 
     @discord.ui.button(label="5 Years", style=discord.ButtonStyle.secondary,
-                       custom_id="panel_5y", row=1)
+                       custom_id="panel_5y", row=0)
     async def btn_5y(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_region_picker(interaction, "5+ years old")
 
     @discord.ui.button(label="Dump", style=discord.ButtonStyle.secondary,
-                       custom_id="panel_dump", row=1)
+                       custom_id="panel_dump", row=0)
     async def btn_dump(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_region_picker(interaction, "dump")
 
 
 def build_panel_embed(counts: dict) -> discord.Embed:
+    def stock(n): return f"**{n:,}** in stock"
     embed = discord.Embed(
         title="DeltaCore Vault",
-        description=(
-            "Press a button to generate an account.\n"
-            "A region selector will appear — pick one or choose **Any region**.\n\u200b"
-        ),
+        description="Select an account type below. A region picker will appear — visible only to you.",
         color=0x7C3AED,
     )
-    embed.add_field(
-        name="30d Accounts",
-        value=f"**{counts.get('+30 days old', 0):,}** in stock",
-        inline=True,
-    )
-    embed.add_field(
-        name="1 Year Accounts",
-        value=f"**{counts.get('+1 year old', 0):,}** in stock",
-        inline=True,
-    )
-    embed.add_field(name="\u200b", value="\u200b", inline=True)
-    embed.add_field(
-        name="5 Year Accounts",
-        value=f"**{counts.get('5+ years old', 0):,}** in stock\nPremium roles only",
-        inline=True,
-    )
-    embed.add_field(
-        name="Dump Accounts",
-        value=f"**{counts.get('dump', 0):,}** in stock\nPremium roles only",
-        inline=True,
-    )
-    embed.add_field(name="\u200b", value="\u200b", inline=True)
-    embed.set_footer(text="DeltaCore Alt Generator  \u2022  Save your account — it is deleted after delivery")
+    embed.add_field(name="30 day",             value=stock(counts.get("+30 days old", 0)), inline=True)
+    embed.add_field(name="1 year",             value=stock(counts.get("+1 year old",  0)), inline=True)
+    embed.add_field(name="\u200b",             value="\u200b",                             inline=True)
+    embed.add_field(name="5 year *(premium)*", value=stock(counts.get("5+ years old", 0)), inline=True)
+    embed.add_field(name="Dump *(premium)*",   value=stock(counts.get("dump",          0)), inline=True)
+    embed.add_field(name="\u200b",             value="\u200b",                             inline=True)
+    embed.set_footer(text="DeltaCore Alt Generator  \u2022  Accounts are deleted after delivery")
     return embed
 
 
