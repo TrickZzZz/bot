@@ -294,20 +294,21 @@ class PanelView(discord.ui.View):
 
 
 def build_panel_embed(counts: dict) -> discord.Embed:
-    def row(label, n, premium=False):
-        tag = "  *— premium*" if premium else ""
-        return f"`{label}{tag}` — **{n:,}** in stock"
+    c30  = counts.get("+30 days old", 0)
+    c1y  = counts.get("+1 year old",  0)
+    c5y  = counts.get("5+ years old", 0)
+    cdmp = counts.get("dump",          0)
 
-    lines = "\n".join([
-        row("30 day",  counts.get("+30 days old", 0)),
-        row("1 year",  counts.get("+1 year old",  0)),
-        row("5 year",  counts.get("5+ years old", 0), premium=True),
-        row("Dump",    counts.get("dump",          0), premium=True),
-    ])
+    lines = (
+        f"**30 day** \u2014 {c30:,} in stock\n"
+        f"**1 year** \u2014 {c1y:,} in stock\n"
+        f"**5 year** \u2014 {c5y:,} in stock  \u00b7  *premium*\n"
+        f"**Dump** \u2014 {cdmp:,} in stock  \u00b7  *premium*"
+    )
 
     embed = discord.Embed(
         title="DeltaCore Vault",
-        description=f"Press a button to claim an account. The region selector is private.\n\u200b\n{lines}",
+        description=f"Press a button to claim an account. The region selector is private.\n\n{lines}",
         color=0x7C3AED,
     )
     embed.set_footer(text="DeltaCore Alt Generator  \u2022  Accounts are deleted after delivery")
