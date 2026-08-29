@@ -13,8 +13,24 @@ from cryptography.fernet import Fernet, InvalidToken
 
 load_dotenv()
 
-TOKEN            = os.environ.get("TOKEN")
-VOICE_CHANNEL_ID = int(os.environ.get("VOICE_CHANNEL_ID", "1521166172182024475"))
+TOKEN              = os.environ.get("TOKEN")
+VOICE_CHANNEL_ID   = int(os.environ.get("VOICE_CHANNEL_ID", "1521166172182024475"))
+PANEL_CHANNEL_ID   = 1521157085771993260
+PANEL_MSG_PATH     = os.path.join(os.path.dirname(__file__), "panel_message_id.json")
+
+def load_panel_msg_id() -> int | None:
+    try:
+        with open(PANEL_MSG_PATH) as f:
+            return int(json.load(f).get("message_id", 0)) or None
+    except Exception:
+        return None
+
+def save_panel_msg_id(msg_id: int):
+    try:
+        with open(PANEL_MSG_PATH, "w") as f:
+            json.dump({"message_id": msg_id}, f)
+    except Exception:
+        pass
 
 # ── Encryption ────────────────────────────────────────────────────────────
 ENCRYPTION_KEY = os.environ.get("ACCOUNT_ENCRYPTION_KEY")
@@ -176,6 +192,7 @@ async def do_generate(interaction: discord.Interaction, account_type: str, regio
               f"{', ' + account.region if account.region else ''}) — {remaining_total} left")
 
         await client.update_stock_channel(remaining_total)
+        await client.send_or_update_panel()
 
     except Exception as e:
         db.rollback()
@@ -325,6 +342,7 @@ class CredBot(discord.Client):
     async def on_ready(self):
         print(f"[*] Ready as {self.user} — {count_alts()} accounts in vault")
         await self.update_stock_channel()
+        await self.send_or_update_panel()
         if not self.refresh_stock.is_running():
             self.refresh_stock.start()
 
@@ -346,9 +364,43 @@ class CredBot(discord.Client):
             except discord.HTTPException:
                 pass
 
+    async def send_or_update_panel(self):
+        """Send or edit the persistent panel in PANEL_CHANNEL_ID."""
+        channel = self.get_channel(PANEL_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(PANEL_CHANNEL_ID)
+            except discord.HTTPException as e:
+                print(f"[!] Could not fetch panel channel: {e}")
+                return
+
+        counts  = count_by_type()
+        embed   = build_panel_embed(counts)
+        msg_id  = load_panel_msg_id()
+
+        if msg_id:
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=embed, view=PanelView())
+                print(f"[*] Panel updated (message {msg_id})")
+                return
+            except discord.NotFound:
+                print("[*] Panel message deleted — resending")
+            except discord.HTTPException as e:
+                print(f"[!] Panel edit failed: {e}")
+
+        # Send a fresh panel
+        try:
+            msg = await channel.send(embed=embed, view=PanelView())
+            save_panel_msg_id(msg.id)
+            print(f"[*] Panel sent (message {msg.id})")
+        except discord.HTTPException as e:
+            print(f"[!] Could not send panel: {e}")
+
     @tasks.loop(minutes=30)
     async def refresh_stock(self):
         await self.update_stock_channel()
+        await self.send_or_update_panel()
 
     @refresh_stock.before_loop
     async def before_refresh(self):
@@ -359,13 +411,6 @@ client = CredBot()
 
 
 # ── Slash commands ─────────────────────────────────────────────────────────
-@client.tree.command(name="panel", description="Send the account generator panel")
-@app_commands.checks.has_permissions(manage_messages=True)
-async def cmd_panel(interaction: discord.Interaction):
-    counts = count_by_type()
-    await interaction.channel.send(embed=build_panel_embed(counts), view=PanelView())
-    await interaction.response.send_message("Panel sent.", ephemeral=True)
-
 generate_group = app_commands.Group(name="generate", description="Generate an account")
 
 @generate_group.command(name="30d", description="+30 days old account")
