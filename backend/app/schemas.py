@@ -33,7 +33,7 @@ class UserOut(BaseModel):
 class AccountBase(BaseModel):
     username:     str           = Field(min_length=1, max_length=150)
     account_type: str           = Field(default="+30 days old", max_length=100)
-    cookie:       Optional[str] = Field(default="", max_length=2000)
+    cookie:       Optional[str] = Field(default="")
     region:       Optional[str] = Field(default="", max_length=10)
 
 
@@ -45,7 +45,7 @@ class AccountUpdate(BaseModel):
     username:     Optional[str] = Field(default=None, min_length=1, max_length=150)
     password:     Optional[str] = Field(default=None, min_length=1, max_length=500)
     account_type: Optional[str] = Field(default=None, max_length=100)
-    cookie:       Optional[str] = Field(default=None, max_length=2000)
+    cookie:       Optional[str] = Field(default=None)
     region:       Optional[str] = Field(default=None, max_length=10)
 
 
@@ -63,7 +63,7 @@ class BulkImportItem(BaseModel):
     username:     str           = Field(min_length=1, max_length=150)
     password:     str           = Field(min_length=1, max_length=500)
     account_type: Optional[str] = Field(default="+30 days old", max_length=100)
-    cookie:       Optional[str] = Field(default="", max_length=2000)
+    cookie:       Optional[str] = Field(default="")
     region:       Optional[str] = Field(default="", max_length=10)
 
 
