@@ -174,25 +174,16 @@ async def do_generate(interaction: discord.Interaction, account_type: str, regio
                 f"No **{account_type}**{reg_str} accounts available.", ephemeral=True)
             return
 
-        pw     = decrypt_secret(account.password)
-        cookie = account.cookie or ""
+        # Copy all needed attributes BEFORE delete+commit — avoids DetachedInstanceError
+        acct_username = account.username
+        acct_region   = account.region or ""
+        pw            = decrypt_secret(account.password)
+        cookie        = account.cookie or ""
 
         db.delete(account)
         db.commit()
 
-        if is_premium:
-            premium_cooldowns[user_id] = time.time() + PREMIUM_COOLDOWN
-        else:
-            cd = get_user_cooldown(interaction.user)
-            if cd:
-                active_cooldowns[user_id] = time.time() + cd
-
         remaining_total = db.query(Account).count()
-        print(f"[+] Sent {account.username} ({account_type}"
-              f"{', ' + account.region if account.region else ''}) — {remaining_total} left")
-
-        await client.update_stock_channel(remaining_total)
-        await client.send_or_update_panel()
 
     except Exception as e:
         db.rollback()
@@ -201,29 +192,47 @@ async def do_generate(interaction: discord.Interaction, account_type: str, regio
     finally:
         db.close()
 
+    # Apply cooldowns now that delivery is confirmed
+    if is_premium:
+        premium_cooldowns[user_id] = time.time() + PREMIUM_COOLDOWN
+    else:
+        cd = get_user_cooldown(interaction.user)
+        if cd:
+            active_cooldowns[user_id] = time.time() + cd
+
+    print(f"[+] Sent {acct_username} ({account_type}"
+          f"{', ' + acct_region if acct_region else ''}) — {remaining_total} left")
+
+    # Build and send the account embed first, then update panel
     embed = discord.Embed(color=0x7C3AED)
-    embed.set_author(name=account.username,
-                     icon_url="https://www.roblox.com/favicon.ico")
-    embed.add_field(name="Username", value=f"`{account.username}`", inline=True)
-    embed.add_field(name="Password", value=f"||`{pw}`||",           inline=True)
-    embed.add_field(name="Type",     value=account_type,            inline=True)
-    if account.region:
-        embed.add_field(name="Region", value=account.region, inline=True)
+    embed.set_author(name=acct_username, icon_url="https://www.roblox.com/favicon.ico")
+    embed.add_field(name="Username", value=f"`{acct_username}`", inline=True)
+    embed.add_field(name="Password", value=f"||`{pw}`||",        inline=True)
+    embed.add_field(name="Type",     value=account_type,         inline=True)
+    if acct_region:
+        embed.add_field(name="Region", value=acct_region, inline=True)
     embed.set_footer(text="DeltaCore Alt Generator  \u2022  Save this — it will not be shown again")
 
     msg_kwargs: dict = {"embed": embed, "ephemeral": True}
 
     if cookie:
         cookie_block = f"**Cookie** (inject with Cookie-Editor):\n||```\n{cookie}\n```||"
-        if len(cookie_block) + 300 > 1900:
+        if len(cookie_block) > 1900:
             f_obj = io.BytesIO(
-                f"username: {account.username}\npassword: {pw}\ncookie: {cookie}\n".encode())
-            msg_kwargs["file"]    = discord.File(f_obj, filename=f"{account.username}.txt")
+                f"username: {acct_username}\npassword: {pw}\ncookie: {cookie}\n".encode())
+            msg_kwargs["file"]    = discord.File(f_obj, filename=f"{acct_username}.txt")
             msg_kwargs["content"] = "Cookie is too long for chat — attached as a file."
         else:
             msg_kwargs["content"] = cookie_block
 
     await interaction.response.send_message(**msg_kwargs)
+
+    # Update panel and channel after delivery — in separate try so errors don't affect the user
+    try:
+        await client.update_stock_channel(remaining_total)
+        await client.send_or_update_panel()
+    except Exception as e:
+        print(f"[!] Panel/channel update failed after generate: {e}")
 
 
 # ── Region select (ephemeral — only visible to the user who clicked) ───────
