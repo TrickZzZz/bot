@@ -17,6 +17,10 @@ _MIGRATIONS = [
     "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS account_type VARCHAR(100) NOT NULL DEFAULT '+30 days old'",
     "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cookie TEXT DEFAULT ''",
     "ALTER TABLE accounts ADD COLUMN IF NOT EXISTS region VARCHAR(10) DEFAULT ''",
+    # Widen cookie column — Roblox cookies exceed VARCHAR(1000)
+    "ALTER TABLE accounts ALTER COLUMN cookie TYPE TEXT",
+    # Widen password column for Fernet-encrypted values
+    "ALTER TABLE accounts ALTER COLUMN password TYPE VARCHAR(1000)",
 ]
 for _sql in _MIGRATIONS:
     try:
