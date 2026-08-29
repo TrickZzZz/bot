@@ -260,7 +260,7 @@ export default function DashboardPage({ onLogout }) {
                       <td className="px-4 py-3 font-medium">{acc.username}</td>
                       <td className="px-4 py-3"><PasswordCell value={acc.password} /></td>
                       <td className="px-4 py-3">
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ring-1 ${typeBadge(acc.account_type)}`}>
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-medium ring-1 whitespace-nowrap ${typeBadge(acc.account_type)}`}>
                           {acc.account_type}
                         </span>
                       </td>
