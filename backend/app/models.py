@@ -1,8 +1,6 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import Column, Integer, String, DateTime, Text
-from sqlalchemy.orm import relationship
-
 from .database import Base
 
 
@@ -26,7 +24,7 @@ class Account(Base):
 
     id           = Column(Integer, primary_key=True, index=True)
     username     = Column(String(150), nullable=False, index=True)
-    password     = Column(String(500), nullable=False)
+    password     = Column(String(1000), nullable=False)
     account_type = Column(String(100), nullable=False, default="+30 days old")
     cookie       = Column(Text, nullable=True, default="")
     region       = Column(String(10), nullable=True, default="")
