@@ -42,8 +42,11 @@ def load_cooldown_roles():
     except (FileNotFoundError, json.JSONDecodeError, ValueError):
         return {}
 
-COOLDOWN_ROLES   = load_cooldown_roles()
-active_cooldowns = {}
+COOLDOWN_ROLES    = load_cooldown_roles()
+active_cooldowns  = {}   # regular command cooldowns (from cooldown_roles.json)
+premium_cooldowns = {}   # separate 2h cooldown for 5y and dump
+PREMIUM_COOLDOWN  = 7200 # 2 hours in seconds
+PREMIUM_TYPES     = {"5+ years old", "dump"}
 
 def get_user_cooldown(member):
     cooldowns = [COOLDOWN_ROLES[role.id] for role in getattr(member, "roles", []) if role.id in COOLDOWN_ROLES]
@@ -56,6 +59,16 @@ def get_remaining_cooldown(user_id):
     remaining = ends_at - time.time()
     if remaining <= 0:
         active_cooldowns.pop(user_id, None)
+        return 0
+    return remaining
+
+def get_premium_remaining(user_id):
+    ends_at = premium_cooldowns.get(user_id)
+    if ends_at is None:
+        return 0
+    remaining = ends_at - time.time()
+    if remaining <= 0:
+        premium_cooldowns.pop(user_id, None)
         return 0
     return remaining
 
@@ -76,6 +89,12 @@ def load_type_roles():
         return {}
 
 TYPE_ROLES = load_type_roles()
+
+# Roles that can access 5+ years old and dump accounts
+# Override file-based config with hardcoded role IDs
+_PREMIUM_ROLE_IDS = {1518294955611787475, 1518571590516740096, 1522920181104381953}
+for _rid in _PREMIUM_ROLE_IDS:
+    TYPE_ROLES[_rid] = ["5+ years old", "dump"]
 
 def get_allowed_types(member) -> list:
     allowed = set(DEFAULT_TYPES)
@@ -183,10 +202,16 @@ async def _handle_generate(interaction: discord.Interaction, requested_type: str
         )
         return
 
-    remaining = get_remaining_cooldown(user_id)
+    # Check appropriate cooldown — premium types have a separate 2h cooldown
+    if requested_type in PREMIUM_TYPES:
+        remaining = get_premium_remaining(user_id)
+        cooldown_label = "premium account cooldown (2h)"
+    else:
+        remaining = get_remaining_cooldown(user_id)
+        cooldown_label = "cooldown"
     if remaining > 0:
         await interaction.response.send_message(
-            f"You're on cooldown. Try again in {format_duration(remaining)}.",
+            f"You're on {cooldown_label}. Try again in {format_duration(remaining)}.",
             ephemeral=True,
         )
         return
@@ -241,9 +266,14 @@ async def _handle_generate(interaction: discord.Interaction, requested_type: str
         else:
             await interaction.response.send_message(msg, ephemeral=True)
 
-        cooldown = get_user_cooldown(interaction.user)
-        if cooldown is not None:
-            active_cooldowns[user_id] = time.time() + cooldown
+        if requested_type in PREMIUM_TYPES:
+            premium_cooldowns[user_id] = time.time() + PREMIUM_COOLDOWN
+            print(f"[+] Applied 2h premium cooldown to user {user_id}")
+        else:
+            cooldown = get_user_cooldown(interaction.user)
+            if cooldown is not None:
+                active_cooldowns[user_id] = time.time() + cooldown
+                print(f"[+] Applied {cooldown}s cooldown to user {user_id}")
 
         remaining_total = db.query(Account).count()
         print(f"[+] Sent {account.username} ({requested_type}{', ' + account.region if account.region else ''}) — {remaining_total} remaining")
