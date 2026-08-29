@@ -272,12 +272,12 @@ class PanelView(discord.ui.View):
         )
         await interaction.response.send_message(embed=embed, view=RegionView(account_type), ephemeral=True)
 
-    @discord.ui.button(label="30d", style=discord.ButtonStyle.primary,
+    @discord.ui.button(label="30 Day ", style=discord.ButtonStyle.primary,
                        custom_id="panel_30d", row=0)
     async def btn_30d(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_region_picker(interaction, "+30 days old")
 
-    @discord.ui.button(label="1 Year", style=discord.ButtonStyle.primary,
+    @discord.ui.button(label="1 Year\u2007", style=discord.ButtonStyle.primary,
                        custom_id="panel_1y", row=0)
     async def btn_1y(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_region_picker(interaction, "+1 year old")
@@ -287,7 +287,7 @@ class PanelView(discord.ui.View):
     async def btn_5y(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_region_picker(interaction, "5+ years old")
 
-    @discord.ui.button(label="Dump", style=discord.ButtonStyle.secondary,
+    @discord.ui.button(label="\u2007Dump\u2007\u2007", style=discord.ButtonStyle.secondary,
                        custom_id="panel_dump", row=0)
     async def btn_dump(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._show_region_picker(interaction, "dump")
