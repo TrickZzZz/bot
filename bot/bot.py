@@ -2,71 +2,36 @@ import discord
 from discord import app_commands
 from discord.ext import tasks
 from datetime import datetime, timezone
-import json
 import os
 import time
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
 from sqlalchemy.orm import sessionmaker, declarative_base
 from cryptography.fernet import Fernet, InvalidToken
+import json
 
 load_dotenv()
 
-TOKEN = os.environ.get("TOKEN")
+TOKEN            = os.environ.get("TOKEN")
 VOICE_CHANNEL_ID = int(os.environ.get("VOICE_CHANNEL_ID", "1521166172182024475"))
 
-# ── Per-type stock channels ──────────────────────────────────────────
-TYPE_CHANNELS_PATH = os.path.join(os.path.dirname(__file__), "type_channels.json")
-
-SHORT_LABEL = {
-    "+30 days old": "30d",
-    "+1 year old": "1 Year",
-    "5+ years old": "5+ Year",
-    "dump": "Dump",
-}
-
-def load_type_channels():
-    try:
-        with open(TYPE_CHANNELS_PATH, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-        out = {}
-        for account_type, channel_id in raw.items():
-            if account_type.startswith("_"):
-                continue
-            try:
-                out[account_type] = int(channel_id)
-            except (TypeError, ValueError):
-                print(f"[!] Skipping type channel for '{account_type}' — invalid channel ID: {channel_id!r}")
-        return out
-    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
-        print(f"[!] Could not load type channels: {e}")
-        return {}
-
-TYPE_CHANNELS = load_type_channels()
-
-# ── Encryption ──────────────────────────────────────────────────────
+# ── Encryption ───────────────────────────────────────────────────────────
 ENCRYPTION_KEY = os.environ.get("ACCOUNT_ENCRYPTION_KEY")
 if not ENCRYPTION_KEY:
-    raise RuntimeError(
-        "ACCOUNT_ENCRYPTION_KEY environment variable is required (same key "
-        "used by the web app's backend — accounts are encrypted with it)."
-    )
+    raise RuntimeError("ACCOUNT_ENCRYPTION_KEY environment variable is required.")
 _fernet = Fernet(ENCRYPTION_KEY.encode() if isinstance(ENCRYPTION_KEY, str) else ENCRYPTION_KEY)
-
 
 def decrypt_secret(token: str) -> str:
     try:
         return _fernet.decrypt(token.encode()).decode()
     except (InvalidToken, AttributeError, ValueError):
-        return "⚠ corrupted — could not decrypt this password"
+        return "⚠ corrupted — could not decrypt"
 
-
-# ── Account type categories ─────────────────────────────────────────
+# ── Account types ────────────────────────────────────────────────────────
 ACCOUNT_TYPES = ["+30 days old", "+1 year old", "5+ years old", "dump"]
 DEFAULT_TYPES  = ["+30 days old"]
 
-
-# ── Cooldown config ───────────────────────────────────────────────
+# ── Cooldown config ──────────────────────────────────────────────────────
 COOLDOWN_ROLES_PATH = os.path.join(os.path.dirname(__file__), "cooldown_roles.json")
 
 def load_cooldown_roles():
@@ -74,19 +39,14 @@ def load_cooldown_roles():
         with open(COOLDOWN_ROLES_PATH, "r", encoding="utf-8") as f:
             raw = json.load(f)
         return {int(role_id): int(seconds) for role_id, seconds in raw.items()}
-    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
-        print(f"[!] Could not load cooldown roles: {e}")
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
         return {}
 
-COOLDOWN_ROLES  = load_cooldown_roles()
+COOLDOWN_ROLES   = load_cooldown_roles()
 active_cooldowns = {}
 
 def get_user_cooldown(member):
-    cooldowns = [
-        COOLDOWN_ROLES[role.id]
-        for role in getattr(member, "roles", [])
-        if role.id in COOLDOWN_ROLES
-    ]
+    cooldowns = [COOLDOWN_ROLES[role.id] for role in getattr(member, "roles", []) if role.id in COOLDOWN_ROLES]
     return min(cooldowns) if cooldowns else None
 
 def get_remaining_cooldown(user_id):
@@ -99,8 +59,7 @@ def get_remaining_cooldown(user_id):
         return 0
     return remaining
 
-
-# ── Account type permissions ────────────────────────────────────────
+# ── Account type permissions ─────────────────────────────────────────────
 TYPE_ROLES_PATH = os.path.join(os.path.dirname(__file__), "type_roles.json")
 
 def load_type_roles():
@@ -113,8 +72,7 @@ def load_type_roles():
                 continue
             out[int(role_id)] = [t for t in types if t in ACCOUNT_TYPES]
         return out
-    except (FileNotFoundError, json.JSONDecodeError, ValueError) as e:
-        print(f"[!] Could not load type roles: {e}")
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
         return {}
 
 TYPE_ROLES = load_type_roles()
@@ -126,30 +84,14 @@ def get_allowed_types(member) -> list:
             allowed.update(TYPE_ROLES[role.id])
     return [t for t in ACCOUNT_TYPES if t in allowed]
 
-
-# ── Database setup ────────────────────────────────────────────────
+# ── Database ─────────────────────────────────────────────────────────────
 DATABASE_URL = os.environ.get("DATABASE_URL")
-engine = create_engine(
-    DATABASE_URL,
-    echo=False,
-    pool_pre_ping=True,
-    pool_recycle=1800,
-)
+engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True, pool_recycle=1800)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 def utcnow():
     return datetime.now(timezone.utc)
-
-def count_alts(account_type=None):
-    db = SessionLocal()
-    try:
-        q = db.query(Account)
-        if account_type:
-            q = q.filter(Account.account_type == account_type)
-        return q.count()
-    finally:
-        db.close()
 
 class Account(Base):
     __tablename__ = "accounts"
@@ -158,12 +100,20 @@ class Account(Base):
     password     = Column(String(500), nullable=False)
     account_type = Column(String(50), nullable=True, default="+30 days old")
     cookie       = Column(Text, nullable=True, default="")
+    region       = Column(String(10), nullable=True, default="")
     created_at   = Column(DateTime(timezone=True), default=utcnow)
     updated_at   = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 Base.metadata.create_all(bind=engine)
 
-# ── Discord Bot ──────────────────────────────────────────────────
+def count_alts():
+    db = SessionLocal()
+    try:
+        return db.query(Account).count()
+    finally:
+        db.close()
+
+# ── Discord bot ──────────────────────────────────────────────────────────
 class CredBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.default())
@@ -171,56 +121,41 @@ class CredBot(discord.Client):
 
     async def setup_hook(self):
         await self.tree.sync()
-        print(f"[*] Synced commands. Logged in as {self.user}")
+        print(f"[*] Synced commands — logged in as {self.user}")
 
     async def on_ready(self):
-        total = count_alts()
-        print(f"[*] Bot is ready. {total} accounts in database.")
-        await self.update_alt_count_channel()
-        await self.update_type_channels()
-        if not self.refresh_alt_count.is_running():
-            self.refresh_alt_count.start()
+        print(f"[*] Bot ready. {count_alts()} accounts in database.")
+        await self.update_stock_channel()
+        if not self.refresh_stock.is_running():
+            self.refresh_stock.start()
 
-    async def _rename_channel(self, channel_id: int, new_name: str):
-        channel = self.get_channel(channel_id)
-        if channel is None:
-            try:
-                channel = await self.fetch_channel(channel_id)
-            except discord.HTTPException as e:
-                print(f"[!] Could not fetch channel {channel_id}: {e}")
-                return
-        if channel.name == new_name:
-            return
-        try:
-            await channel.edit(name=new_name)
-            print(f"[*] Updated channel name to '{new_name}'")
-        except discord.HTTPException as e:
-            print(f"[!] Could not rename channel {channel_id}: {e}")
-
-    async def update_alt_count_channel(self, count=None):
+    async def update_stock_channel(self, count=None):
         if not VOICE_CHANNEL_ID:
             return
         if count is None:
             count = count_alts()
-        await self._rename_channel(VOICE_CHANNEL_ID, f"{count} Alts Stocked 🇬🇧")
-
-    async def update_type_channels(self, only_type: str = None):
-        types_to_update = [only_type] if only_type else list(TYPE_CHANNELS.keys())
-        for account_type in types_to_update:
-            channel_id = TYPE_CHANNELS.get(account_type)
-            if not channel_id:
-                continue
-            count = count_alts(account_type)
-            label = SHORT_LABEL.get(account_type, account_type)
-            await self._rename_channel(channel_id, f"{count} {label} Alts Stocked 🇬🇧")
+        channel = self.get_channel(VOICE_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(VOICE_CHANNEL_ID)
+            except discord.HTTPException as e:
+                print(f"[!] Could not fetch channel: {e}")
+                return
+        new_name = f"{count} Alts Stocked"
+        if channel.name == new_name:
+            return
+        try:
+            await channel.edit(name=new_name)
+            print(f"[*] Channel updated: {new_name}")
+        except discord.HTTPException as e:
+            print(f"[!] Could not rename channel: {e}")
 
     @tasks.loop(minutes=30)
-    async def refresh_alt_count(self):
-        await self.update_alt_count_channel()
-        await self.update_type_channels()
+    async def refresh_stock(self):
+        await self.update_stock_channel()
 
-    @refresh_alt_count.before_loop
-    async def before_refresh_alt_count(self):
+    @refresh_stock.before_loop
+    async def before_refresh(self):
         await self.wait_until_ready()
 
 client = CredBot()
@@ -235,7 +170,8 @@ def format_duration(seconds):
     if secs or not parts: parts.append(f"{secs}s")
     return " ".join(parts)
 
-async def _handle_generate(interaction: discord.Interaction, requested_type: str):
+# ── Generate handler ─────────────────────────────────────────────────────
+async def _handle_generate(interaction: discord.Interaction, requested_type: str, requested_region: str = None):
     user_id = interaction.user.id
 
     allowed = get_allowed_types(interaction.user)
@@ -257,28 +193,27 @@ async def _handle_generate(interaction: discord.Interaction, requested_type: str
 
     db = SessionLocal()
     try:
-        account = (
-            db.query(Account)
-            .filter(Account.account_type == requested_type)
-            .order_by(Account.id.asc())
-            .first()
-        )
+        query = db.query(Account).filter(Account.account_type == requested_type)
+        if requested_region:
+            query = query.filter(Account.region == requested_region.upper())
+        account = query.order_by(Account.id.asc()).first()
+
         if not account:
+            region_msg = f" from **{requested_region.upper()}**" if requested_region else ""
             await interaction.response.send_message(
-                f"No **{requested_type}** credentials left.", ephemeral=True
+                f"No **{requested_type}**{region_msg} accounts left.", ephemeral=True
             )
             return
 
         plain_password = decrypt_secret(account.password)
         cookie         = account.cookie or ""
+        region_tag     = f" `{account.region}`" if account.region else ""
 
-        # Build the message — always include credentials, add cookie if present
         cred_block = f"```\nusername: {account.username}\npassword: {plain_password}\n```"
 
         if cookie:
-            # Cookie is long — send in a spoiler so it doesn't flood the channel
             cookie_block = (
-                f"\n**Cookie** (inject with EditThisCookie / Cookie-Editor):\n"
+                f"\n**Cookie** (inject with Cookie-Editor):\n"
                 f"||```\n{cookie}\n```||"
             )
         else:
@@ -287,29 +222,21 @@ async def _handle_generate(interaction: discord.Interaction, requested_type: str
         msg = (
             cred_block
             + cookie_block
-            + f"\n-# {requested_type} — Save everything! This will be deleted in 15 minutes."
+            + f"\n-# {requested_type}{region_tag} — Save everything! Deleted in 15 minutes."
         )
-
-        # Discord has a 2000 char limit — if cookie makes it too long, send as file
-        if len(msg) > 1900:
-            import io
-            file_content = (
-                f"username: {account.username}\n"
-                f"password: {plain_password}\n"
-                f"cookie: {cookie}\n"
-            )
-            file_obj = io.BytesIO(file_content.encode())
-            discord_file = discord.File(file_obj, filename=f"{account.username}.txt")
-            short_msg = (
-                f"```\nusername: {account.username}\npassword: {plain_password}\n```\n"
-                f"-# Cookie is too long for chat — attached as a file.\n"
-                f"-# {requested_type} — Save everything! Deleted in 15 minutes."
-            )
 
         db.delete(account)
         db.commit()
 
         if len(msg) > 1900:
+            import io
+            file_content = f"username: {account.username}\npassword: {plain_password}\ncookie: {cookie}\n"
+            file_obj     = io.BytesIO(file_content.encode())
+            discord_file = discord.File(file_obj, filename=f"{account.username}.txt")
+            short_msg    = (
+                f"```\nusername: {account.username}\npassword: {plain_password}\n```\n"
+                f"-# Cookie attached as file — {requested_type}{region_tag}. Deleted in 15 minutes."
+            )
             await interaction.response.send_message(short_msg, file=discord_file, ephemeral=True)
         else:
             await interaction.response.send_message(msg, ephemeral=True)
@@ -317,13 +244,11 @@ async def _handle_generate(interaction: discord.Interaction, requested_type: str
         cooldown = get_user_cooldown(interaction.user)
         if cooldown is not None:
             active_cooldowns[user_id] = time.time() + cooldown
-            print(f"[+] Applied {cooldown}s cooldown to user {user_id}")
 
         remaining_total = db.query(Account).count()
-        print(f"[+] Sent account ID {account.id} ({requested_type}, {remaining_total} total remaining)")
+        print(f"[+] Sent {account.username} ({requested_type}{', ' + account.region if account.region else ''}) — {remaining_total} remaining")
 
-        await client.update_alt_count_channel(remaining_total)
-        await client.update_type_channels(only_type=requested_type)
+        await client.update_stock_channel(remaining_total)
 
     except Exception as e:
         db.rollback()
@@ -332,17 +257,28 @@ async def _handle_generate(interaction: discord.Interaction, requested_type: str
     finally:
         db.close()
 
-
-generate_group = app_commands.Group(name="generate", description="Get and delete the next credential from the database")
+# ── Slash commands ───────────────────────────────────────────────────────
+generate_group = app_commands.Group(name="generate", description="Get an account from the vault")
 
 @generate_group.command(name="30d", description="Get a +30 days old account")
-async def generate_30d(interaction: discord.Interaction):
-    await _handle_generate(interaction, "+30 days old")
+@app_commands.describe(region="Region code e.g. GB, DE, US (leave blank for any)")
+async def generate_30d(interaction: discord.Interaction, region: str = None):
+    await _handle_generate(interaction, "+30 days old", region)
 
 @generate_group.command(name="1y", description="Get a +1 year old account")
-async def generate_1y(interaction: discord.Interaction):
-    await _handle_generate(interaction, "+1 year old")
+@app_commands.describe(region="Region code e.g. GB, DE, US (leave blank for any)")
+async def generate_1y(interaction: discord.Interaction, region: str = None):
+    await _handle_generate(interaction, "+1 year old", region)
+
+@generate_group.command(name="5y", description="Get a 5+ years old account")
+@app_commands.describe(region="Region code e.g. GB, DE, US (leave blank for any)")
+async def generate_5y(interaction: discord.Interaction, region: str = None):
+    await _handle_generate(interaction, "5+ years old", region)
+
+@generate_group.command(name="dump", description="Get a dump account")
+@app_commands.describe(region="Region code e.g. GB, DE, US (leave blank for any)")
+async def generate_dump(interaction: discord.Interaction, region: str = None):
+    await _handle_generate(interaction, "dump", region)
 
 client.tree.add_command(generate_group)
-
 client.run(TOKEN)
