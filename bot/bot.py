@@ -251,10 +251,10 @@ class RegionSelect(discord.ui.Select):
         options = [discord.SelectOption(label="Any region", value="any", default=True)]
         for code, name in REGIONS:
             options.append(discord.SelectOption(label=f"{name} ({code})", value=code))
+        # No custom_id — this is a short-lived ephemeral view, not a persistent one.
         super().__init__(
             placeholder="Select a region (optional)...",
             options=options, min_values=1, max_values=1,
-            custom_id=f"region_sel_{account_type.replace(' ','_').replace('+','').replace('/','')}"
         )
 
     async def callback(self, interaction: discord.Interaction):
@@ -264,8 +264,13 @@ class RegionSelect(discord.ui.Select):
 
 class RegionView(discord.ui.View):
     def __init__(self, account_type: str):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120)
         self.add_item(RegionSelect(account_type))
+
+    async def on_timeout(self):
+        # Disable the select so a stale click shows it's expired rather than erroring
+        for item in self.children:
+            item.disabled = True
 
 
 # ── Main panel view (persistent — survives restarts) ──────────────────────
