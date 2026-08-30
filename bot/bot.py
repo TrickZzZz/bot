@@ -143,6 +143,35 @@ def count_by_type():
                 for t in ACCOUNT_TYPES}
     finally: db.close()
 
+REGION_FLAGS = {
+    "GB": "🇬🇧", "DE": "🇩🇪", "NL": "🇳🇱", "IT": "🇮🇹", "PL": "🇵🇱",
+    "TR": "🇹🇷", "RU": "🇷🇺", "IQ": "🇮🇶", "US": "🇺🇸", "CA": "🇨🇦",
+    "AU": "🇦🇺", "FR": "🇫🇷", "ES": "🇪🇸", "SE": "🇸🇪", "NO": "🇳🇴",
+    "DK": "🇩🇰", "FI": "🇫🇮", "BE": "🇧🇪", "CH": "🇨🇭", "AT": "🇦🇹",
+    "PT": "🇵🇹", "CZ": "🇨🇿", "RO": "🇷🇴", "HU": "🇭🇺", "UA": "🇺🇦",
+    "BR": "🇧🇷", "MX": "🇲🇽", "AR": "🇦🇷", "IN": "🇮🇳", "JP": "🇯🇵",
+    "KR": "🇰🇷", "SG": "🇸🇬", "NZ": "🇳🇿", "ZA": "🇿🇦", "SA": "🇸🇦",
+    "AE": "🇦🇪", "EG": "🇪🇬", "SY": "🇸🇾", "CO": "🇨🇴",
+}
+
+def count_by_region(limit: int = 8):
+    """Top `limit` regions by stock, highest first. Only regions with accounts.
+    Returns a list of (code, count) tuples."""
+    db = SessionLocal()
+    try:
+        from sqlalchemy import func
+        rows = (
+            db.query(Account.region, func.count(Account.id))
+            .filter(Account.region.isnot(None))
+            .filter(Account.region != "")
+            .group_by(Account.region)
+            .all()
+        )
+        counts = [(str(r or "").upper(), int(c)) for r, c in rows if r and c > 0]
+        counts.sort(key=lambda x: x[1], reverse=True)
+        return counts[:limit]
+    finally: db.close()
+
 # ── Core generate logic ────────────────────────────────────────────────────
 async def do_generate(interaction: discord.Interaction, account_type: str, region: str = None):
     user_id = interaction.user.id
@@ -325,6 +354,19 @@ def build_panel_embed(counts: dict) -> discord.Embed:
         description=f"Press a button to claim an account. The region selector is private.\n\n{lines}",
         color=0x7C3AED,
     )
+
+    # Region breakdown — two-column grid, flags next to codes, top 8 by stock
+    region_counts = count_by_region(limit=8)
+    if region_counts:
+        rows = [f"{REGION_FLAGS.get(code, '\U0001F310')} {code} \u2014 **{cnt:,}**"
+                for code, cnt in region_counts]
+        # Split into two columns for a grid look
+        half = (len(rows) + 1) // 2
+        col1 = "\n".join(rows[:half])
+        col2 = "\n".join(rows[half:]) or "\u200b"
+        embed.add_field(name="By region", value=col1, inline=True)
+        embed.add_field(name="\u200b",    value=col2, inline=True)
+
     embed.set_footer(text="DeltaCore Alt Generator  \u2022  Accounts are deleted after delivery")
     return embed
 
