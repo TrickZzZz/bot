@@ -19,6 +19,19 @@
     <button type="button" class="ghost" data-copy="/claim_key {{ key }}" data-label="Copy command" data-fallback="#key">Copy command</button>
     <button type="button" class="ghost" data-copy="{{ order_id }}" data-label="Copy order ID" data-fallback="#order-id">Copy order ID</button>
   </div>
+  {% if details %}
+  <div class="receipt">
+    <h3 class="receipt-title">Order details</h3>
+    <dl>
+      <div><dt>Plan</dt><dd>{{ plan_name }}</dd></div>
+      {% if paid_at %}<div><dt>Paid</dt><dd>{{ paid_at }}</dd></div>{% endif %}
+      {% for label, value in details.rows %}
+      <div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
+      {% endfor %}
+      <div class="receipt-total"><dt>Total paid</dt><dd>{{ details.total }} {{ details.currency }}</dd></div>
+    </dl>
+  </div>
+  {% endif %}
   {% if revoked %}
   <p class="notice">This key has been revoked and can't be redeemed. Contact staff in the Discord if you think that's a mistake.</p>
   {% elif claimed %}

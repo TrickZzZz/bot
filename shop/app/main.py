@@ -94,22 +94,96 @@ class LicenseKey(Base):
     claimed_by = Column(BigInteger, nullable=True)
     claimed_at = Column(DateTime(timezone=True), nullable=True)
     buyer_email = Column(String(320), nullable=True)
+    # What Stripe charged, in minor units (cents). Saved when the order is fulfilled.
+    pay_currency = Column(String(8), nullable=True)
+    pay_subtotal = Column(Integer, nullable=True)
+    pay_tax      = Column(Integer, nullable=True)
+    pay_discount = Column(Integer, nullable=True)
+    pay_total    = Column(Integer, nullable=True)
+
+
+# Columns the shop owns on license_keys (the bot's own copy of the table doesn't map them).
+SHOP_COLUMNS = {
+    "buyer_email":  "VARCHAR(320)",
+    "pay_currency": "VARCHAR(8)",
+    "pay_subtotal": "INTEGER",
+    "pay_tax":      "INTEGER",
+    "pay_discount": "INTEGER",
+    "pay_total":    "INTEGER",
+}
 
 
 def init_db():
     Base.metadata.create_all(bind=engine)
-    # If the bot created the table first, make sure the email column exists.
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(
-                "ALTER TABLE license_keys ADD COLUMN IF NOT EXISTS buyer_email VARCHAR(320)"))
-    except Exception as e:  # SQLite has no IF NOT EXISTS for columns; fine for local runs
-        log.info("buyer_email column check skipped: %s", e)
+    # If the bot created the table first, add the shop's columns to it.
+    for name, sql_type in SHOP_COLUMNS.items():
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    f"ALTER TABLE license_keys ADD COLUMN IF NOT EXISTS {name} {sql_type}"))
+        except Exception as e:  # SQLite has no IF NOT EXISTS for columns; fine for local runs
+            log.info("%s column check skipped: %s", name, e)
 
 
 def generate_key(plan: str) -> str:
     body = "".join(secrets.choice(KEY_ALPHABET) for _ in range(12))
     return f"TRK-{plan[0].upper()}-{body[:4]}-{body[4:8]}-{body[8:]}"
+
+
+CURRENCY_SYMBOLS = {"usd": "$", "gbp": "£", "eur": "€"}
+
+
+def money(cents: int, currency: str) -> str:
+    """12345, 'usd' -> '$123.45'. Currencies without a symbol show as '123.45 CAD'."""
+    cur    = (currency or CURRENCY).lower()
+    amount = f"{abs(cents) / 100:,.2f}"
+    symbol = CURRENCY_SYMBOLS.get(cur)
+    shown  = f"{symbol}{amount}" if symbol else f"{amount} {cur.upper()}"
+    return f"-{shown}" if cents < 0 else shown
+
+
+def when_text(dt) -> str:
+    if dt is None:
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    return f"{dt.day} {dt:%b %Y}, {dt:%H:%M} UTC"
+
+
+def _cents(value):
+    """Stripe amounts are whole numbers. Anything else counts as 'not provided'."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def payment_fields(order: dict) -> dict:
+    """The amounts on a Checkout Session, as the columns they are stored in."""
+    totals   = order.get("total_details") or {}
+    currency = order.get("currency")
+    return {
+        "pay_currency": currency.lower()[:8] if isinstance(currency, str) else None,
+        "pay_subtotal": _cents(order.get("amount_subtotal")),
+        "pay_tax":      _cents(totals.get("amount_tax")),
+        "pay_discount": _cents(totals.get("amount_discount")),
+        "pay_total":    _cents(order.get("amount_total")),
+    }
+
+
+def order_details(row):
+    """Lines for the 'Order details' box. Discount and tax only appear when Stripe
+    included them. None when no amounts were saved (keys sold before this existed)."""
+    if row.pay_total is None:
+        return None
+    cur  = row.pay_currency
+    rows = []
+    if row.pay_subtotal is not None:
+        rows.append(("Subtotal", money(row.pay_subtotal, cur)))
+    if row.pay_discount:
+        rows.append(("Discount", money(-row.pay_discount, cur)))
+    if row.pay_tax:
+        rows.append(("Tax / VAT", money(row.pay_tax, cur)))
+    return {"rows": rows, "total": money(row.pay_total, cur),
+            "currency": (cur or CURRENCY).upper()}
 
 
 def fulfil(order: dict):
@@ -122,15 +196,25 @@ def fulfil(order: dict):
         log.error("Paid order %s has no valid plan metadata (%r)", sid, plan_id)
         return None
     email = (order.get("customer_details") or {}).get("email")
+    pay   = payment_fields(order)
 
     for _ in range(3):
         db = SessionLocal()
         try:
             row = db.query(LicenseKey).filter(LicenseKey.order_ref == sid).first()
             if row:
-                return row.key
+                existing = row.key
+                if row.pay_total is None and pay["pay_total"] is not None:
+                    try:  # keys issued before amounts were saved get them on the next event
+                        for name, value in pay.items():
+                            setattr(row, name, value)
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                        log.exception("Could not save the payment details for %s", sid)
+                return existing
             key = generate_key(plan_id)
-            db.add(LicenseKey(key=key, plan=plan_id, order_ref=sid, buyer_email=email))
+            db.add(LicenseKey(key=key, plan=plan_id, order_ref=sid, buyer_email=email, **pay))
             db.commit()
             log.info("Issued a %s key for order %s", plan_id, sid)
             return key
@@ -151,7 +235,8 @@ def find_order(session_id: str):
         # claimed_by == 0 is the bot's "revoked by an owner" marker, not a real Discord id.
         return {"key": row.key, "plan": row.plan,
                 "claimed": row.claimed_by is not None and row.claimed_by != 0,
-                "revoked": row.claimed_by == 0}
+                "revoked": row.claimed_by == 0,
+                "paid_at": when_text(row.created_at), "details": order_details(row)}
     finally:
         db.close()
 
@@ -364,6 +449,10 @@ def success(request: Request, session_id: str = ""):
             "payment_status": raw.get("payment_status"),
             "metadata": raw.get("metadata") or {},
             "customer_details": raw.get("customer_details") or {},
+            "amount_subtotal": raw.get("amount_subtotal"),
+            "amount_total": raw.get("amount_total"),
+            "currency": raw.get("currency"),
+            "total_details": raw.get("total_details") or {},
         }
         if fulfil(data) is None:
             if data["payment_status"] == "paid":
@@ -383,7 +472,7 @@ def success(request: Request, session_id: str = ""):
 
     resp = render(request, "success.html", 200, key=order["key"], order_id=session_id,
                   plan_name=PLANS[order["plan"]]["name"], claimed=order["claimed"],
-                  revoked=order["revoked"])
+                  revoked=order["revoked"], details=order["details"], paid_at=order["paid_at"])
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["X-Robots-Tag"] = "noindex"
     return resp
