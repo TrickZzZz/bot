@@ -157,6 +157,8 @@ OWNER_ROLE_IDS  = parse_id_list(os.environ.get(
 OWNER_KEY_PLANS = {"1d": "day", "1w": "week"}     # /gen keylicense choice -> key plan
 PLAN_LABELS     = {"day": "1 day", "week": "1 week"}
 REVOKED_BY      = 0   # license_keys.claimed_by sentinel: revoked by an owner, never redeemable
+EXTEND_MAX_HOURS = 8760   # /extend limit (one year), so a typo like 100000 can't hand out decades
+EXTEND_DM_GAP    = 0.6    # seconds between DMs when /extend all notifies people, to stay under Discord's limits
 
 class LicenseKey(Base):
     """One row per sold key. Inserted by the shop (or /genkey), redeemed by /claim_key."""
@@ -429,6 +431,33 @@ def db_end_user_access(user_id: int, guild_id: int) -> list:
                        .values(active=False))
             db.commit()
         return ids
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def db_extend_access(guild_id: int, hours: int, user_id: int | None = None) -> list:
+    """Add `hours` to every live access window in the guild, or just user_id's.
+    Live means active and not yet expired: a window that has already run out is left
+    alone (the expiry loop is about to close it). The rows are locked while they are
+    changed, so the expiry loop and a second /extend wait their turn instead of racing.
+    Returns [(user_id, new_expires_at), ...] and changes nothing if it raises."""
+    delta = timedelta(hours=hours)
+    db    = SessionLocal()
+    try:
+        q = (db.query(KeyAccess)
+               .filter(KeyAccess.guild_id == guild_id,
+                       KeyAccess.active.is_(True),
+                       KeyAccess.expires_at > utcnow()))
+        if user_id is not None:
+            q = q.filter(KeyAccess.user_id == user_id)
+        done = []
+        for row in q.with_for_update().all():
+            row.expires_at = aware(row.expires_at) + delta
+            done.append((row.user_id, row.expires_at))
+        db.commit()
+        return done
     except Exception:
         db.rollback()
         raise
@@ -1097,6 +1126,122 @@ async def revoke_user_cmd(interaction: discord.Interaction, user: discord.Member
     await interaction.followup.send(msg, ephemeral=True)
 
 
+# ── Extend access (owners) ──────────────────────────────────────────────────
+def hours_label(hours: int) -> str:
+    text = f"{hours} hour{'s' if hours != 1 else ''}"
+    if hours >= 24 and hours % 24 == 0:
+        days = hours // 24
+        text += f" ({days} day{'s' if days != 1 else ''})"
+    return text
+
+def access_end_text(dt) -> str:
+    ts = int(dt.timestamp())
+    return f"<t:{ts}:F> (<t:{ts}:R>)"
+
+def extend_dm_embed(hours: int, end) -> discord.Embed:
+    return discord.Embed(
+        title="Your access was extended",
+        description=(f"Staff added **{hours_label(hours)}** to your **Tracker Access**.\n"
+                     f"It now ends {access_end_text(end)}."),
+        color=0x7C3AED)
+
+async def extend_windows(interaction: discord.Interaction, hours: int, user_id: int | None = None):
+    """Add hours to live access windows (everyone's, or just user_id's). Returns
+    {user_id: latest new end time}, empty when nobody had live access, or None when the
+    database refused (nothing changed)."""
+    try:
+        rows = await asyncio.to_thread(db_extend_access, interaction.guild.id, hours, user_id)
+    except Exception as e:
+        print(f"[!] /extend failed: {e}")
+        return None
+    ends = {}
+    for uid, end in rows:
+        if uid not in ends or end > ends[uid]:
+            ends[uid] = end
+    scope = f"user {user_id}" if user_id is not None else "everyone"
+    print(f"[keys] {interaction.user.id} extended {scope} by {hours}h: "
+          f"{len(rows)} window(s), {len(ends)} user(s)")
+    return ends
+
+async def dm_extension(user_id: int, hours: int, end) -> bool:
+    """Tell someone their access was extended. False if they can't be reached."""
+    try:
+        user = await client.fetch_user(user_id)
+    except discord.HTTPException:          # includes NotFound
+        return False
+    return await try_dm(user, extend_dm_embed(hours, end))
+
+
+owner_extend = app_commands.Group(name="extend", description="Owner tools", guild_only=True)
+
+@owner_extend.command(name="all", description="(Owner) Add hours to everyone's current Tracker Access")
+@app_commands.describe(hours=f"Hours to add, 1 to {EXTEND_MAX_HOURS}",
+                       notify="DM each person their new end time (off by default, it can be a lot of DMs)")
+async def extend_all_cmd(interaction: discord.Interaction,
+                         hours: app_commands.Range[int, 1, EXTEND_MAX_HOURS], notify: bool = False):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    ends = await extend_windows(interaction, hours)
+    if ends is None:
+        await interaction.followup.send(
+            "I couldn't update the database, so nothing was changed.", ephemeral=True)
+        return
+    if not ends:
+        await interaction.followup.send(
+            "Nobody has live Tracker Access right now, so nothing was extended.", ephemeral=True)
+        return
+
+    n = len(ends)
+    lines = [f"Added **{hours_label(hours)}** to **{n}** {'person' if n == 1 else 'people'}'s Tracker Access.",
+             f"Earliest end now: {access_end_text(min(ends.values()))}",
+             f"Latest end now: {access_end_text(max(ends.values()))}"]
+    if notify:
+        sent = 0
+        for i, (uid, end) in enumerate(ends.items()):
+            if i:
+                await asyncio.sleep(EXTEND_DM_GAP)
+            if await dm_extension(uid, hours, end):
+                sent += 1
+        lines.append(f"DMs: {sent} sent, {n - sent} not delivered (DMs closed or no longer in the server)")
+    else:
+        lines.append("DMs: not sent")
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
+@owner_extend.command(name="user", description="(Owner) Add hours to one person's current Tracker Access")
+@app_commands.describe(user="Whose access to extend", hours=f"Hours to add, 1 to {EXTEND_MAX_HOURS}",
+                       notify="DM them their new end time")
+async def extend_user_cmd(interaction: discord.Interaction, user: discord.Member,
+                          hours: app_commands.Range[int, 1, EXTEND_MAX_HOURS], notify: bool = True):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    ends = await extend_windows(interaction, hours, user.id)
+    if ends is None:
+        await interaction.followup.send(
+            "I couldn't update the database, so nothing was changed.", ephemeral=True)
+        return
+    if user.id not in ends:
+        await interaction.followup.send(
+            f"{user.mention} has no live Tracker Access to extend. "
+            f"To give them time, use `/gen keylicense`.", ephemeral=True)
+        return
+
+    end   = ends[user.id]
+    lines = [f"Extended {user.mention} by **{hours_label(hours)}**.",
+             f"Their access now ends {access_end_text(end)}."]
+    if notify:
+        delivered = await try_dm(user, extend_dm_embed(hours, end))
+        lines.append("DM: sent" if delivered else "DM: not delivered (their DMs are closed)")
+    else:
+        lines.append("DM: not sent")
+    if not any(r.id == TRACKER_ROLE_ID for r in getattr(user, "roles", [])):
+        lines.append("Heads up: they don't have the Tracker Access role right now, so the extra "
+                     "time won't help until it is given back.")
+    await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+
 # ── Order lookup (owners) ───────────────────────────────────────────────────
 ORDER_REF_RE = re.compile(r"cs_(?:test|live)_[A-Za-z0-9]{10,200}")
 
@@ -1214,5 +1359,6 @@ client.tree.add_command(claim_key)
 client.tree.add_command(genkey)
 client.tree.add_command(owner_gen)
 client.tree.add_command(owner_revoke)
+client.tree.add_command(owner_extend)
 client.tree.add_command(order_lookup)
 client.run(TOKEN)
