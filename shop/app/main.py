@@ -369,16 +369,19 @@ def success(request: Request, session_id: str = ""):
             if data["payment_status"] == "paid":
                 return message(request, "Key not created",
                                "Your payment went through but the key wasn't created. "
-                               "Contact support with the email you paid with.", 500)
+                               "Open a support ticket in the Discord with the email you paid "
+                               f"with and this order ID: {session_id}", 500)
             return message(request, "Waiting for payment",
                            "Stripe hasn't confirmed this payment yet. This page checks again on its own.",
                            200, refresh=5)
         order = find_order(session_id)
 
     if order is None:
-        return message(request, "Key not found", "Contact support with the email you paid with.", 500)
+        return message(request, "Key not found",
+                       "Open a support ticket in the Discord with the email you paid "
+                       f"with and this order ID: {session_id}", 500)
 
-    resp = render(request, "success.html", 200, key=order["key"],
+    resp = render(request, "success.html", 200, key=order["key"], order_id=session_id,
                   plan_name=PLANS[order["plan"]]["name"], claimed=order["claimed"],
                   revoked=order["revoked"])
     resp.headers["Cache-Control"] = "no-store"
