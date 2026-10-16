@@ -327,6 +327,17 @@ async def stripe_webhook(request: Request):
     return {"received": True}
 
 
+def plain(obj):
+    """Newer stripe-python objects aren't dicts (obj.get() raises), so convert to plain data."""
+    if hasattr(obj, "to_dict"):
+        obj = obj.to_dict()
+    if isinstance(obj, dict):
+        return {k: plain(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [plain(v) for v in obj]
+    return obj
+
+
 @app.get("/success")
 def success(request: Request, session_id: str = ""):
     if not SESSION_ID_RE.match(session_id):
@@ -347,11 +358,12 @@ def success(request: Request, session_id: str = ""):
             return message(request, "Still checking",
                            "Stripe didn't answer. This page tries again on its own.", 502, refresh=5)
 
+        raw = plain(sess)
         data = {
-            "id": sess["id"],
-            "payment_status": sess["payment_status"],
-            "metadata": dict(sess.get("metadata") or {}),
-            "customer_details": dict(sess.get("customer_details") or {}),
+            "id": raw.get("id"),
+            "payment_status": raw.get("payment_status"),
+            "metadata": raw.get("metadata") or {},
+            "customer_details": raw.get("customer_details") or {},
         }
         if fulfil(data) is None:
             if data["payment_status"] == "paid":
