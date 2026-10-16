@@ -87,7 +87,7 @@ header.top {
   color: var(--text); text-decoration: none;
 }
 .mark:hover { color: var(--text); }
-.mark svg { width: 1.8rem; height: 1.8rem; flex: none; }
+.mark img { height: 2.4rem; width: auto; flex: none; }
 .nav-links { display: none; gap: 1.5rem; margin-left: auto; margin-right: 0.5rem; }
 .nav-links a { color: var(--muted); text-decoration: none; font-size: 0.95rem; font-weight: 500; }
 .nav-links a:hover { color: var(--text); }
@@ -229,6 +229,46 @@ button:disabled { background: var(--surface-2); color: var(--muted); box-shadow:
 .slot:nth-child(7).on { animation-delay: 0.52s; }
 @keyframes fill { from { transform: scaleX(0); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
 
+/* Loot reel: a strip of screenshots that moves on by itself and can be swiped.
+   Every frame is the same height; its width follows the picture. */
+.reel { --reel-h: clamp(16rem, 70vw, 26rem); }
+.reel-track {
+  position: relative;
+  display: flex; gap: 1rem;
+  overflow-x: auto; overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory; scroll-behavior: smooth;
+  scrollbar-width: thin; scrollbar-color: var(--line) transparent;
+  padding-bottom: 0.5rem;
+}
+.reel-slide {
+  flex: none; height: var(--reel-h); scroll-snap-align: start;
+  background: var(--surface);
+  border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+.reel-slide:hover, .reel-slide:focus-within { border-color: rgba(217, 70, 239, 0.55); }
+.reel-slide a { display: block; height: 100%; }
+.reel-slide a:focus-visible { outline-offset: -4px; border-radius: 12px; }
+.reel-slide img { display: block; height: 100%; width: auto; max-width: none; }
+
+/* The seven-slot motif again: one slot per screenshot, the lit one is on screen. */
+.reel-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem 1rem; margin-top: 0.75rem; }
+.reel-bar[hidden] { display: none; }
+.reel-dots { display: flex; gap: 6px; }
+.reel .reel-dot {
+  position: relative; min-height: 0; width: 1.6rem; height: 0.65rem; padding: 0;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px;
+}
+.reel .reel-dot::after { content: ""; position: absolute; inset: -0.85rem -0.2rem; } /* bigger tap target */
+.reel .reel-dot:hover { border-color: var(--fuchsia); }
+.reel .reel-dot[aria-current="true"] {
+  background: linear-gradient(90deg, var(--fuchsia-mid), var(--fuchsia));
+  border-color: transparent; box-shadow: 0 0 12px -2px var(--glow);
+}
+.reel-ctl { display: flex; gap: 0.5rem; }
+.reel .reel-btn { min-width: 2.75rem; padding: 0 1rem; }
+.reel-btn svg { width: 1.1rem; height: 1.1rem; }
+
 .notice {
   margin: 1rem 0 0; padding: 0.8rem 1rem;
   background: var(--surface); border-left: 3px solid var(--fuchsia); border-radius: 6px;
@@ -353,4 +393,6 @@ footer nav a:hover { color: var(--text); }
   html { scroll-behavior: auto; }
   .slot.on { animation: none; }
   .btn, button { transition: none; }
+  .reel-track { scroll-behavior: auto; }
+  .reel-slide { transition: none; }
 }

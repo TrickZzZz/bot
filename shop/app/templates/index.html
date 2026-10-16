@@ -32,6 +32,40 @@
   </div>
 </section>
 
+{% set loot = [
+  ("loot-1.webp", 1400, 694, "Gear screen with a container beside it full of PKM machine guns, 7.62x54 ammo boxes, JPC plate carriers and M4A1 rifles, and a backpack holding armour and 161,676 rubles."),
+  ("loot-2.webp", 580, 839, "Inventory with M4A1 rifles, an R700 and a TFZ98S rifle, body armour, a helmet and a bundle of 471,591 rubles, and a backpack full of flare guns."),
+  ("loot-3.webp", 569, 766, ".338 Lapua ammo stacks, rows of M4A1 rifles, and R700 and TFZ98S rifles in the inventory."),
+  ("loot-4.webp", 583, 876, "Nearby loot grid of M4A1 rifles, flare guns, R700 and TFZ98S rifles, .338 magazines and ammo."),
+  ("loot-5.webp", 1400, 694, "Gear screen with a chest rig holding 23,994 rubles and .338 ammo, AS Val rifles equipped, and flare guns filling the shirt and pants slots."),
+  ("loot-6.webp", 563, 448, "Backpack grid filled with flare guns."),
+] %}
+<section id="loot" aria-labelledby="loot-h">
+  <div class="section-head">
+    <h2 id="loot-h">Loot made with Tracker Access</h2>
+    <p>Screenshots of inventories and stashes collected with the tracker. Select one to open it full size.</p>
+  </div>
+  <div class="reel" data-reel data-interval="4500" role="group" aria-roledescription="carousel" aria-label="Loot screenshots">
+    <div class="reel-track" data-reel-track>
+      {% for file, w, h, alt in loot %}
+      <div class="reel-slide" role="group" aria-roledescription="slide" aria-label="{{ loop.index }} of {{ loop.length }}">
+        <a href="/static/loot/{{ file }}" target="_blank" rel="noopener"><img src="/static/loot/{{ file }}" width="{{ w }}" height="{{ h }}" alt="{{ alt }}" decoding="async"{% if loop.index > 2 %} loading="lazy"{% endif %}></a>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="reel-bar" data-reel-bar hidden>
+      <div class="reel-dots" role="group" aria-label="Choose a screenshot">
+        {% for file, w, h, alt in loot %}<button type="button" class="reel-dot" data-reel-go="{{ loop.index0 }}" aria-label="Show screenshot {{ loop.index }} of {{ loop.length }}"></button>{% endfor %}
+      </div>
+      <div class="reel-ctl">
+        <button type="button" class="ghost reel-btn" data-reel-toggle>Pause</button>
+        <button type="button" class="ghost reel-btn" data-reel-prev aria-label="Previous screenshot"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M12.5 4 6.5 10l6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <button type="button" class="ghost reel-btn" data-reel-next aria-label="Next screenshot"><svg viewBox="0 0 20 20" aria-hidden="true" focusable="false"><path d="M7.5 4l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section id="keys" aria-labelledby="plans-h">
   <div class="section-head">
     <h2 id="plans-h">Choose a key</h2>
