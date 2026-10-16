@@ -951,9 +951,99 @@ async def gen_keylicense(interaction: discord.Interaction,
         ephemeral=True)
 
 
+REVOKE_ERRORS = {
+    "db_error":   "I couldn't update the database, so nothing was changed.",
+    "role_error": "I couldn't remove the role, so nothing was changed. Check that I have "
+                  "Manage Roles and that my role sits above Tracker Access.",
+}
+
+async def revoke_member_access(guild, role, user_id: int, member, actor):
+    """End every live Tracker access window for user_id and take the Tracker role off them.
+    member is None when they are no longer in the server. Returns (outcome, detail):
+      ("db_error", None)    nothing was changed
+      ("role_error", None)  Discord refused the role removal; windows were put back, nothing changed
+      ("nothing", None)     they had no access window and no role
+      ("ok", {"ended": n, "had_role": bool, "delivered": bool})"""
+    try:
+        ended = await asyncio.to_thread(db_end_user_access, user_id, guild.id)
+    except Exception as e:
+        print(f"[!] revoke DB error for {user_id}: {e}")
+        return "db_error", None
+
+    had_role = member is not None and role in member.roles
+    if had_role:
+        try:
+            await member.remove_roles(role, reason=f"Tracker access revoked by {actor}")
+        except discord.HTTPException as e:  # includes Forbidden
+            print(f"[!] Could not remove role from {user_id}: {e}")
+            for access_id in ended:         # put the windows back: nothing changed
+                try:
+                    await asyncio.to_thread(db_reactivate, access_id)
+                except Exception as undo_err:
+                    print(f"[!] CRITICAL: could not reopen access {access_id}: {undo_err}")
+            return "role_error", None
+
+    if not ended and not had_role:
+        return "nothing", None
+
+    delivered = False
+    if member is not None:
+        embed = discord.Embed(
+            title="Your access has ended",
+            description=("Staff have ended your **Tracker Access** and removed the role. "
+                         "If you think that's a mistake, contact staff."),
+            color=0xEF4444)
+        delivered = await try_dm(member, embed)
+    print(f"[keys] {actor.id} revoked {user_id}: role={'removed' if had_role else 'absent'}, "
+          f"windows={len(ended)}, DM {'sent' if delivered else 'not sent'}")
+    return "ok", {"ended": len(ended), "had_role": had_role, "delivered": delivered}
+
+def revoke_summary(title: str, detail: dict, in_server: bool = True) -> str:
+    if detail["had_role"]:
+        role_line = "yes"
+    else:
+        role_line = "they did not have it" if in_server else "they are no longer in the server"
+    if detail["delivered"]:
+        dm_line = "sent"
+    else:
+        dm_line = ("not delivered (their DMs are closed)" if in_server
+                   else "not sent (they are no longer in the server)")
+    return (f"{title}\n"
+            f"Role removed: {role_line}\n"
+            f"Key windows ended: {detail['ended']}\n"
+            f"DM: {dm_line}")
+
+async def revoke_redeemed_key(interaction: discord.Interaction, user_id):
+    """/revoke key on a key somebody already redeemed: end that person's access and take
+    the Tracker role off them. Returns the message for the owner."""
+    if not user_id:
+        return "That key was already redeemed, but I couldn't tell by whom. Use `/revoke user`."
+    guild = interaction.guild
+    role  = guild.get_role(TRACKER_ROLE_ID)
+    if role is None:
+        print(f"[!] Tracker role {TRACKER_ROLE_ID} not found in guild")
+        return "The Tracker Access role could not be found."
+    try:
+        # fetch, don't use the cache: without the members intent cached roles can be stale
+        member = await guild.fetch_member(user_id)
+    except discord.NotFound:
+        member = None                       # they left the server: no role left to remove
+    except discord.HTTPException as e:
+        print(f"[!] Could not look up member {user_id}: {e}")
+        return "I couldn't look that user up on Discord, so nothing was changed."
+
+    who = f"<@{user_id}>"
+    outcome, detail = await revoke_member_access(guild, role, user_id, member, interaction.user)
+    if outcome == "nothing":
+        return f"That key was redeemed by {who}, but they have no Tracker Access left to remove."
+    if outcome != "ok":
+        return REVOKE_ERRORS[outcome]
+    return revoke_summary(f"Revoked the key redeemed by {who}.", detail, in_server=member is not None)
+
+
 owner_revoke = app_commands.Group(name="revoke", description="Owner tools", guild_only=True)
 
-@owner_revoke.command(name="key", description="(Owner) Stop an unredeemed key from being used")
+@owner_revoke.command(name="key", description="(Owner) Revoke a key; if it was redeemed, remove their role")
 @app_commands.describe(key="The key to revoke, e.g. TRK-D-ABCD-EFGH-JKLM")
 async def revoke_key_cmd(interaction: discord.Interaction, key: str):
     if not await require_owner(interaction):
@@ -972,8 +1062,11 @@ async def revoke_key_cmd(interaction: discord.Interaction, key: str):
     elif status == "revoked":
         msg = "That key has already been revoked."
     elif status == "claimed":
-        who = f"<@{detail}>" if detail else "someone"
-        msg = f"That key was already redeemed by {who}. Use `/revoke user` to end their access."
+        try:
+            msg = await revoke_redeemed_key(interaction, detail)
+        except Exception as e:
+            print(f"[!] /revoke key (redeemed) failed: {e}")
+            msg = "Something went wrong ending their access. Check the bot logs."
     else:
         msg = f"Revoked the **{PLAN_LABELS.get(detail, detail)}** key. It can no longer be redeemed."
     print(f"[keys] {interaction.user.id} ran /revoke key -> {status}")
@@ -994,49 +1087,14 @@ async def revoke_user_cmd(interaction: discord.Interaction, user: discord.Member
             "The Tracker Access role could not be found.", ephemeral=True)
         return
 
-    try:
-        ended = await asyncio.to_thread(db_end_user_access, user.id, guild.id)
-    except Exception as e:
-        print(f"[!] /revoke user DB error: {e}")
-        await interaction.followup.send(
-            "I couldn't update the database, so nothing was changed.", ephemeral=True)
-        return
-
-    had_role = role in user.roles
-    if had_role:
-        try:
-            await user.remove_roles(role, reason=f"Tracker access revoked by {interaction.user}")
-        except discord.HTTPException as e:  # includes Forbidden
-            print(f"[!] Could not remove role from {user.id}: {e}")
-            for access_id in ended:         # put the windows back: nothing changed
-                try:
-                    await asyncio.to_thread(db_reactivate, access_id)
-                except Exception as undo_err:
-                    print(f"[!] CRITICAL: could not reopen access {access_id}: {undo_err}")
-            await interaction.followup.send(
-                "I couldn't remove the role, so nothing was changed. Check that I have "
-                "Manage Roles and that my role sits above Tracker Access.", ephemeral=True)
-            return
-
-    if not ended and not had_role:
-        await interaction.followup.send(
-            f"{user.mention} has no Tracker Access to revoke.", ephemeral=True)
-        return
-
-    embed = discord.Embed(
-        title="Your access has ended",
-        description=("Staff have ended your **Tracker Access** and removed the role. "
-                     "If you think that's a mistake, contact staff."),
-        color=0xEF4444)
-    delivered = await try_dm(user, embed)
-    print(f"[keys] {interaction.user.id} revoked {user.id}: role={'removed' if had_role else 'absent'}, "
-          f"windows={len(ended)}, DM {'sent' if delivered else 'failed'}")
-    await interaction.followup.send(
-        f"Revoked {user.mention}.\n"
-        f"Role removed: {'yes' if had_role else 'they did not have it'}\n"
-        f"Key windows ended: {len(ended)}\n"
-        f"DM: {'sent' if delivered else 'not delivered (their DMs are closed)'}",
-        ephemeral=True)
+    outcome, detail = await revoke_member_access(guild, role, user.id, user, interaction.user)
+    if outcome == "nothing":
+        msg = f"{user.mention} has no Tracker Access to revoke."
+    elif outcome == "ok":
+        msg = revoke_summary(f"Revoked {user.mention}.", detail)
+    else:
+        msg = REVOKE_ERRORS[outcome]
+    await interaction.followup.send(msg, ephemeral=True)
 
 
 # ── Order lookup (owners) ───────────────────────────────────────────────────
