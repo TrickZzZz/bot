@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+
+{% block head %}{% if refresh %}<meta http-equiv="refresh" content="{{ refresh }}">{% endif %}{% endblock %}
+
+{% block main %}
+<section class="intro">
+  <h1>{{ title }}</h1>
+  <p class="lede">{{ body }}</p>
+  <p><a class="back" href="/">Back to the shop</a></p>
+</section>
+{% endblock %}

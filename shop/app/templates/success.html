@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Your Tracker Access key{% endblock %}
+
+{% block head %}<meta name="robots" content="noindex">{% endblock %}
+
+{% block main %}
+<section class="intro">
+  <h1>Payment received</h1>
+  <p class="lede">Here is your {{ plan_name }} key. Keep this page's link: opening it again shows the key again.</p>
+</section>
+
+<section aria-labelledby="key-h">
+  <h2 id="key-h" class="vh">Your key</h2>
+  <p class="key" id="key">{{ key }}</p>
+  <div class="actions">
+    <button type="button" class="solid" data-copy="{{ key }}" data-label="Copy key" data-fallback="#key">Copy key</button>
+    <button type="button" class="ghost" data-copy="/claim_key {{ key }}" data-label="Copy command" data-fallback="#key">Copy command</button>
+  </div>
+  {% if claimed %}
+  <p class="notice">This key has already been redeemed in Discord.</p>
+  {% endif %}
+</section>
+
+<section aria-labelledby="next-h">
+  <h2 id="next-h">Redeem it</h2>
+  <ol class="steps">
+    <li>Open our Discord server.</li>
+    <li>Run <code>/claim_key</code> and paste your key.</li>
+    <li>Your time starts then. We remove the role and send you a DM when it ends.</li>
+  </ol>
+  {% if support_url %}
+  <p><a class="back" href="{{ support_url }}" rel="noopener">Open the Discord</a></p>
+  {% endif %}
+</section>
+{% endblock %}

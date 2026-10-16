@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Tracker Access keys{% endblock %}</title>
+  <meta name="description" content="Buy a 1-day or 7-day Tracker Access key and redeem it in Discord with /claim_key.">
+  {% block head %}{% endblock %}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,200..800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="top">
+    <a class="mark" href="/">Tracker Access</a>
+    {% if support_url %}<a class="quiet" href="{{ support_url }}" rel="noopener">Join the Discord</a>{% endif %}
+  </header>
+  <main>
+    {% block main %}{% endblock %}
+  </main>
+  <footer>
+    <p>Payments are handled by Stripe. We never see your card details.</p>
+  </footer>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

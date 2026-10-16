@@ -148,6 +148,7 @@ class LicenseKey(Base):
     created_at = Column(DateTime(timezone=True), default=utcnow)
     claimed_by = Column(BigInteger, nullable=True)              # Discord user id
     claimed_at = Column(DateTime(timezone=True), nullable=True)
+    buyer_email = Column(String(320), nullable=True)            # from the shop's checkout
 
 class KeyAccess(Base):
     """A user's live Tracker Access window. The expiry loop removes the role at expires_at."""

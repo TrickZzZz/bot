@@ -1,0 +1,6 @@
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+jinja2==3.1.4
+SQLAlchemy==2.0.36
+psycopg2-binary>=2.9.9
+stripe>=10.0.0,<16

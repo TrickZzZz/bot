@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block main %}
+<section class="intro">
+  <h1>Tracker Access, by the day or the week</h1>
+  <p class="lede">Pay once, copy your key, and redeem it in our Discord with <code>/claim_key</code>. The role comes off by itself when your time runs out.</p>
+</section>
+
+<section aria-labelledby="plans-h">
+  <h2 id="plans-h" class="vh">Choose a key</h2>
+  <ul class="plans">
+    {% for p in plans %}
+    <li class="plan">
+      <div class="plan-head">
+        <p class="plan-name">{{ p.name }}</p>
+        <p class="plan-price">{{ p.price }}</p>
+        {% if p.days > 1 %}<p class="plan-note">{{ p.per_day }} a day</p>{% endif %}
+      </div>
+      <div class="span" role="img" aria-label="{{ p.name }} of access, out of a possible 7 days">
+        {% for i in range(7) %}<span class="slot{% if i < p.days %} on{% endif %}"></span>{% endfor %}
+      </div>
+      <form class="buy" method="post" action="/buy/{{ p.id }}">
+        <button type="submit" data-busy="Opening checkout…" {% if not checkout_ready %}disabled{% endif %}>Buy {{ p.label }}</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% if not checkout_ready %}
+  <p class="notice">Checkout isn't switched on yet. Check back soon.</p>
+  {% endif %}
+</section>
+
+<section aria-labelledby="how-h">
+  <h2 id="how-h">How it works</h2>
+  <ol class="steps">
+    <li>Pick a key and pay on Stripe's checkout page.</li>
+    <li>Copy your key from the confirmation page.</li>
+    <li>In our Discord, run <code>/claim_key</code> and paste the key. You get the Tracker Access role, and we send you a DM when your time is up.</li>
+  </ol>
+</section>
+
+<section aria-labelledby="faq-h">
+  <h2 id="faq-h">Questions</h2>
+  <div class="faq">
+    <details>
+      <summary>When does my time start?</summary>
+      <p>When you run <code>/claim_key</code>, not when you pay. You can buy now and claim later.</p>
+    </details>
+    <details>
+      <summary>Can I buy more than one key?</summary>
+      <p>Yes. If you claim a second key while you still have access, its time is added to what you have left.</p>
+    </details>
+    <details>
+      <summary>I lost my key.</summary>
+      <p>Open the confirmation page again from the link Stripe sent you back to. If that's gone, ask the staff in our Discord and have the email you paid with ready.</p>
+    </details>
+  </div>
+</section>
+{% endblock %}
