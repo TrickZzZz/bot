@@ -464,6 +464,37 @@ def db_extend_access(guild_id: int, hours: int, user_id: int | None = None) -> l
     finally:
         db.close()
 
+def db_user_key_info(user_id: int, guild_id: int, show: int = 8) -> dict:
+    """What /keyinfo shows about one user: their Tracker Access windows in this server and
+    the keys they have redeemed (a key isn't tied to a server). Read only. Returns
+      live_ends  sorted end times of windows that are active and not yet expired
+      last_end   latest end time among the other windows, or None
+      keys       the newest `show` redeemed keys, newest first
+      key_total  how many keys they have redeemed in all
+      plans      {plan: count} across all of them"""
+    now = utcnow()
+    db  = SessionLocal()
+    try:
+        windows = [(aware(w.expires_at), bool(w.active))
+                   for w in db.query(KeyAccess)
+                              .filter(KeyAccess.user_id == user_id,
+                                      KeyAccess.guild_id == guild_id).all()]
+        rows = (db.query(LicenseKey)
+                  .filter(LicenseKey.claimed_by == user_id)
+                  .order_by(LicenseKey.claimed_at.desc()).all())
+        keys = [{"key": r.key, "plan": r.plan, "claimed_at": aware(r.claimed_at),
+                 "order_ref": r.order_ref} for r in rows]
+    finally:
+        db.close()
+
+    live  = sorted(end for end, active in windows if active and end > now)
+    ended = [end for end, active in windows if not (active and end > now)]
+    plans = {}
+    for k in keys:
+        plans[k["plan"]] = plans.get(k["plan"], 0) + 1
+    return {"live_ends": live, "last_end": max(ended) if ended else None,
+            "keys": keys[:show], "key_total": len(keys), "plans": plans}
+
 
 # ── Core generate logic ────────────────────────────────────────────────────
 async def do_generate(interaction: discord.Interaction, account_type: str, region: str = None):
@@ -1355,10 +1386,95 @@ async def order_lookup(interaction: discord.Interaction, order_id: str):
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
+# ── Key info (owners) ───────────────────────────────────────────────────────
+def key_source_short(order_ref) -> str:
+    """Where a key came from, in a few words (order_source has the long version)."""
+    if not order_ref:
+        return "/genkey"
+    if order_ref.startswith("owner:"):
+        parts = order_ref.split(":")
+        return f"Owner key by <@{parts[1]}>" if len(parts) == 3 and parts[1].isdigit() else "Owner key"
+    return "Website order"
+
+def keyinfo_access_text(info: dict) -> str:
+    if info["live_ends"]:
+        return "\n".join(f"Live, ends {access_end_text(end)}" for end in info["live_ends"])
+    if info["last_end"]:
+        return f"No live access.\nLast ended {access_end_text(info['last_end'])}"
+    return "No live access."
+
+def keyinfo_role_text(in_server, has_role: bool, live: bool) -> str:
+    if in_server is None:
+        return "Couldn't check (Discord lookup failed)"
+    if not in_server:
+        return "Not in this server, but their access is still live" if live else "Not in this server"
+    if has_role:
+        return ("Has the Tracker Access role" if live else
+                "Has the Tracker Access role, but no live access. `/revoke user` takes it off.")
+    return ("Doesn't have the Tracker Access role, but has live access" if live else
+            "Doesn't have the Tracker Access role")
+
+def keyinfo_keys_text(info: dict) -> str:
+    total = info["key_total"]
+    if not total:
+        return "None redeemed"
+    plans = info["plans"]
+    parts = [f"{plans[p]} × {PLAN_LABELS.get(p, p)}" for p in plans]
+    span  = sum((KEY_PLANS[p] * n for p, n in plans.items() if p in KEY_PLANS), timedelta())
+    head  = f"**{total}** redeemed: {', '.join(parts)}"
+    if span.days:
+        head += f" ({span.days} day{'s' if span.days != 1 else ''} of key time)"
+    lines = []
+    for k in info["keys"]:
+        when = f" · <t:{int(k['claimed_at'].timestamp())}:d>" if k["claimed_at"] else ""
+        lines.append(f"`{k['key']}` · {PLAN_LABELS.get(k['plan'], k['plan'])}{when} · {key_source_short(k['order_ref'])}")
+    older = total - len(lines)
+    while lines and len("\n".join([head, *lines, "…"])) > 1000:   # keep inside Discord's field limit
+        lines.pop()
+        older = total - len(lines)
+    if older:
+        lines.append(f"…and {older} older")
+    return "\n".join([head, *lines])
+
+@app_commands.command(name="keyinfo", description="(Owner) See a user's keys and Tracker Access")
+@app_commands.describe(user="Who to look up")
+@app_commands.guild_only()
+async def keyinfo_cmd(interaction: discord.Interaction, user: discord.User):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    try:
+        info = await asyncio.to_thread(db_user_key_info, user.id, guild.id)
+    except Exception as e:
+        print(f"[!] /keyinfo failed: {e}")
+        await interaction.followup.send("I couldn't look that up. Check the bot logs.", ephemeral=True)
+        return
+
+    in_server, has_role = None, False
+    try:
+        # fetch, don't use the cache: without the members intent cached roles can be stale
+        member    = await guild.fetch_member(user.id)
+        in_server = True
+        has_role  = any(r.id == TRACKER_ROLE_ID for r in member.roles)
+    except discord.NotFound:
+        in_server = False
+    except discord.HTTPException as e:
+        print(f"[!] Could not look up member {user.id}: {e}")
+    print(f"[keys] {interaction.user.id} ran /keyinfo on {user.id}")
+
+    embed = discord.Embed(title="Key info", description=f"{user.mention} (`{user.id}`)", color=0x7C3AED)
+    embed.add_field(name="Tracker Access", value=keyinfo_access_text(info), inline=False)
+    embed.add_field(name="Role", value=keyinfo_role_text(in_server, has_role, bool(info["live_ends"])), inline=False)
+    embed.add_field(name="Keys redeemed", value=keyinfo_keys_text(info), inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 client.tree.add_command(claim_key)
 client.tree.add_command(genkey)
 client.tree.add_command(owner_gen)
 client.tree.add_command(owner_revoke)
 client.tree.add_command(owner_extend)
 client.tree.add_command(order_lookup)
+client.tree.add_command(keyinfo_cmd)
 client.run(TOKEN)
