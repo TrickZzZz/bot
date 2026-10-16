@@ -37,6 +37,16 @@
     <h2 id="plans-h">Choose a key</h2>
     <p>One payment per key. No subscription.</p>
   </div>
+  <form class="buy-form" method="post">
+  <div class="terms">
+    <h3 class="terms-title">Before you buy</h3>
+    <p class="terms-text">All sales on this website are final. We can't give refunds for purchases made here or for lost keys. If you have any issue, you'll need to contact us by opening a support ticket in {% if support_url %}<a href="{{ support_url }}" rel="noopener">our Discord</a>{% else %}our Discord{% endif %}.</p>
+    <label class="terms-check">
+      <input type="checkbox" name="agree" value="yes" required>
+      <span>I have read and agree to the <a href="/terms" target="_blank" rel="noopener">Terms of Service</a>.</span>
+    </label>
+    <p class="terms-hint" data-terms-hint>Tick the box to switch on checkout.</p>
+  </div>
   <ul class="plans">
     {% for p in plans %}
     <li class="plan{% if p.days > 1 %} feat{% endif %}">
@@ -51,12 +61,11 @@
       <div class="span" role="img" aria-label="{{ p.name }} of access, out of a possible 7 days">
         {% for i in range(7) %}<span class="slot{% if i < p.days %} on{% endif %}"></span>{% endfor %}
       </div>
-      <form class="buy" method="post" action="/buy/{{ p.id }}">
-        <button type="submit" data-busy="Opening checkout…" {% if not checkout_ready %}disabled{% endif %}>Buy {{ p.label }}</button>
-      </form>
+      <button type="submit" formaction="/buy/{{ p.id }}" data-busy="Opening checkout…" {% if not checkout_ready %}disabled{% endif %}>Buy {{ p.label }}</button>
     </li>
     {% endfor %}
   </ul>
+  </form>
   {% if not checkout_ready %}
   <p class="notice">Checkout isn't switched on yet. Check back soon.</p>
   {% endif %}
@@ -101,7 +110,11 @@
     </details>
     <details>
       <summary>I lost my key.</summary>
-      <p>Open the confirmation page again from the link Stripe sent you back to. If that's gone, ask the staff in our Discord and have the email you paid with ready.</p>
+      <p>Open the confirmation page again from the link Stripe sent you back to. If that's gone, open a support ticket in our Discord and have the email you paid with ready. Lost keys can't be refunded.</p>
+    </details>
+    <details>
+      <summary>Can I get a refund?</summary>
+      <p>No. All sales are final, including lost keys. If you have a problem with your purchase, open a support ticket in our Discord and our staff will look into it.</p>
     </details>
   </div>
 </section>
@@ -111,7 +124,7 @@
   <div class="band">
     <div>
       <h2 id="help-h">Need a hand?</h2>
-      <p>Ask in the Discord and have the email you paid with ready.</p>
+      <p>Open a support ticket in the Discord and have the email you paid with ready.</p>
     </div>
     <a class="btn btn-primary" href="{{ support_url }}" rel="noopener">Join the Discord</a>
   </div>

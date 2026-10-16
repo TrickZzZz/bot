@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Terms of Service{% endblock %}
+
+{% block main %}
+<section class="intro">
+  <h1>Terms of Service</h1>
+  <p class="lede">Last updated {{ updated }}. These terms apply to every purchase on this website.</p>
+</section>
+
+<section class="prose" aria-label="Terms">
+  <h2>All sales are final</h2>
+  <p>Every purchase on this website is final. We can't give refunds for purchases made here.</p>
+
+  <h2>Lost keys</h2>
+  <p>Your key is your responsibility. Keep it private and save it somewhere safe. We aren't liable for lost keys and we can't refund them.</p>
+
+  <h2>Instant delivery</h2>
+  <p>Your key is delivered digitally on the confirmation page as soon as your payment goes through. By buying, you agree to have it delivered straight away, and that you can't cancel the purchase once it has been delivered.</p>
+
+  <h2>If something goes wrong</h2>
+  <p>If you have any issue with a purchase or a key, you need to contact us by opening a support ticket in {% if support_url %}<a href="{{ support_url }}" rel="noopener">our Discord</a>{% else %}our Discord{% endif %}. Have the email you paid with ready so we can find your order.</p>
+
+  <h2>Agreeing to these terms</h2>
+  <p>You must tick the box at checkout to buy. By ticking it, you confirm you have read and agree to these terms. We save the time you agreed alongside your payment.</p>
+</section>
+
+<p><a class="back" href="/#keys">Back to the shop</a></p>
+{% endblock %}

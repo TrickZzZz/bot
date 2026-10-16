@@ -18,8 +18,9 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import stripe
 from fastapi import FastAPI, Request
@@ -63,6 +64,8 @@ PLANS = {
     "day":  {"name": "1 day",  "label": "1-day key", "cents": 50,  "days": 1},
     "week": {"name": "7 days", "label": "7-day key", "cents": 200, "days": 7},
 }
+# Bump this date whenever the wording on /terms changes. It is saved on every payment.
+TOS_VERSION = "2026-10-16"
 KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I lookalikes
 SESSION_ID_RE = re.compile(r"^cs_(test|live)_[A-Za-z0-9]{10,200}$")
 
@@ -217,6 +220,19 @@ def message(request: Request, title: str, body: str, status: int = 200, refresh:
     return render(request, "message.html", status, title=title, body=body, refresh=refresh)
 
 
+async def read_form(request: Request, limit: int = 4096) -> dict:
+    """Read a small urlencoded form body without extra dependencies. Anything bigger
+    than `limit` bytes is treated as empty."""
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return {}
+        chunks.append(chunk)
+    parsed = parse_qs(b"".join(chunks).decode("utf-8", "replace"))
+    return {k: v[-1] for k, v in parsed.items()}
+
+
 @app.get("/")
 def index(request: Request):
     plans = [{
@@ -227,14 +243,24 @@ def index(request: Request):
     return render(request, "index.html", plans=plans, checkout_ready=bool(STRIPE_SECRET_KEY))
 
 
+@app.get("/terms")
+def terms(request: Request):
+    d = date.fromisoformat(TOS_VERSION)
+    return render(request, "terms.html", updated=f"{d.day} {d:%B %Y}")
+
+
 @app.post("/buy/{plan_id}")
-def buy(request: Request, plan_id: str):
+async def buy(request: Request, plan_id: str):
     plan = PLANS.get(plan_id)
     if plan is None:
         return message(request, "Unknown key", "That key length doesn't exist. Pick one from the shop.", 404)
     if not STRIPE_SECRET_KEY:
         return message(request, "Checkout isn't ready",
                        "Payments aren't switched on yet. Check back soon.", 503)
+    form = await read_form(request)
+    if form.get("agree") != "yes":
+        return message(request, "Agree to the terms first",
+                       "Tick the box to accept the terms of service, then choose your key again.", 400)
     ip = request.client.host if request.client else "unknown"
     if rate_limited(ip):
         return message(request, "Too many attempts",
@@ -242,7 +268,8 @@ def buy(request: Request, plan_id: str):
 
     base = site_base(request)
     try:
-        session = stripe.checkout.Session.create(
+        session = await run_in_threadpool(
+            stripe.checkout.Session.create,
             api_key=STRIPE_SECRET_KEY,
             mode="payment",
             line_items=[{
@@ -258,7 +285,10 @@ def buy(request: Request, plan_id: str):
             }],
             success_url=f"{base}/success?session_id={{CHECKOUT_SESSION_ID}}",
             cancel_url=f"{base}/",
-            metadata={"plan": plan_id},
+            # The terms version and time are kept on the payment as a record of consent.
+            metadata={"plan": plan_id,
+                      "tos_version": TOS_VERSION,
+                      "tos_accepted_at": datetime.now(timezone.utc).isoformat(timespec="seconds")},
         )
     except stripe.StripeError:
         log.exception("Creating a Checkout Session failed")

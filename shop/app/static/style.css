@@ -139,16 +139,17 @@ h2 { font-weight: 700; font-size: clamp(1.5rem, 3.6vw, 2rem); line-height: 1.2; 
   text-decoration: none;
   transition: box-shadow 0.15s ease, border-color 0.15s ease, filter 0.15s ease;
 }
-.btn-primary, .buy button, button.solid {
+.btn-primary, .plan button, button.solid {
   background: linear-gradient(135deg, var(--fuchsia-mid), var(--fuchsia-deep));
   color: #fff;
   box-shadow: 0 8px 28px -10px var(--glow);
 }
-.btn-primary:hover, .buy button:hover:not(:disabled), button.solid:hover { color: #fff; filter: brightness(1.12); box-shadow: 0 10px 34px -8px var(--glow); }
+.btn-primary:hover, .plan button:hover:not(:disabled), button.solid:hover { color: #fff; filter: brightness(1.12); box-shadow: 0 10px 34px -8px var(--glow); }
 .btn-ghost, button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
 .btn-ghost:hover, button.ghost:hover { color: var(--text); border-color: var(--fuchsia); }
 button:disabled { background: var(--surface-2); color: var(--muted); box-shadow: none; cursor: not-allowed; border-color: var(--line); }
-.buy button { width: 100%; }
+.plan button { width: 100%; }
+.buy-form.busy .plan button { pointer-events: none; filter: brightness(0.85); }
 
 /* Hero */
 .hero { display: grid; gap: 2.5rem; align-items: center; padding-block: 3.5rem 0.5rem; }
@@ -232,6 +233,24 @@ button:disabled { background: var(--surface-2); color: var(--muted); box-shadow:
   margin: 1rem 0 0; padding: 0.8rem 1rem;
   background: var(--surface); border-left: 3px solid var(--fuchsia); border-radius: 6px;
 }
+
+/* Terms box above the key cards */
+.terms {
+  margin-bottom: 1.5rem; padding: 1.25rem 1.5rem;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 18px;
+}
+.terms-title { font-size: 1.05rem; font-weight: 700; }
+.terms-text { margin: 0.5rem 0 0; max-width: 46rem; color: var(--muted); }
+.terms-check { display: flex; align-items: flex-start; gap: 0.75rem; margin-top: 1rem; font-weight: 500; cursor: pointer; }
+.terms-check input { flex: none; width: 1.35rem; height: 1.35rem; margin: 0.15rem 0 0; accent-color: var(--fuchsia); cursor: pointer; }
+.terms-hint { margin: 0.6rem 0 0; color: var(--muted); font-size: 0.9rem; }
+.terms-hint[hidden] { display: none; }
+
+/* Long-form text (terms page) */
+.prose { max-width: 40rem; }
+.prose h2 { font-size: 1.25rem; margin: 2rem 0 0.5rem; }
+.prose h2:first-child { margin-top: 0; }
+.prose p { margin: 0; color: var(--muted); }
 
 /* Steps */
 .steps {
