@@ -1,13 +1,16 @@
 import discord
 from discord import app_commands
 from discord.ext import tasks
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import asyncio
 import os
 import io
+import secrets
 import time
 import json
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text
+from sqlalchemy import (create_engine, Column, Integer, BigInteger, Boolean,
+                        String, DateTime, Text, update, delete)
 from sqlalchemy.orm import sessionmaker, declarative_base
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -129,6 +132,32 @@ class Account(Base):
     created_at   = Column(DateTime(timezone=True), default=utcnow)
     updated_at   = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
+# ── Tracker keys ───────────────────────────────────────────────────────────
+TRACKER_ROLE_ID = int(os.environ.get("TRACKER_ROLE_ID", "1560565978486673450"))
+SHOP_URL        = os.environ.get("SHOP_URL", "")
+KEY_PLANS       = {"day": timedelta(days=1), "week": timedelta(days=7)}
+KEY_ALPHABET    = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I lookalikes
+
+class LicenseKey(Base):
+    """One row per sold key. Inserted by the shop (or /genkey), redeemed by /claim_key."""
+    __tablename__ = "license_keys"
+    id         = Column(Integer, primary_key=True)
+    key        = Column(String(64), unique=True, nullable=False, index=True)
+    plan       = Column(String(10), nullable=False)             # "day" | "week"
+    order_ref  = Column(String(200), unique=True, nullable=True)  # payment session id
+    created_at = Column(DateTime(timezone=True), default=utcnow)
+    claimed_by = Column(BigInteger, nullable=True)              # Discord user id
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+
+class KeyAccess(Base):
+    """A user's live Tracker Access window. The expiry loop removes the role at expires_at."""
+    __tablename__ = "key_access"
+    id         = Column(Integer, primary_key=True)
+    user_id    = Column(BigInteger, nullable=False, index=True)
+    guild_id   = Column(BigInteger, nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False, index=True)
+    active     = Column(Boolean, nullable=False, default=True, index=True)
+
 Base.metadata.create_all(bind=engine)
 
 def count_alts():
@@ -171,6 +200,143 @@ def count_by_region(limit: int = 8):
         counts.sort(key=lambda x: x[1], reverse=True)
         return counts[:limit]
     finally: db.close()
+
+# ── Key helpers (sync DB work — call through asyncio.to_thread) ────────────
+def aware(dt):
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+def generate_key(plan: str) -> str:
+    body = "".join(secrets.choice(KEY_ALPHABET) for _ in range(12))
+    return f"TRK-{plan[0].upper()}-{body[:4]}-{body[4:8]}-{body[8:]}"
+
+def db_create_keys(plan: str, count: int) -> list:
+    if plan not in KEY_PLANS:
+        raise ValueError(f"Unknown plan: {plan}")
+    keys = [generate_key(plan) for _ in range(count)]
+    db = SessionLocal()
+    try:
+        for k in keys:
+            db.add(LicenseKey(key=k, plan=plan))
+        db.commit()
+        return keys
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def db_claim_key(user_id: int, guild_id: int, raw_key: str):
+    """Atomically claim a key and create or extend the user's access window.
+    Returns ("ok", info) | ("invalid", None) | ("used", None)."""
+    key = raw_key.strip().upper()
+    now = utcnow()
+    db  = SessionLocal()
+    try:
+        row = db.query(LicenseKey).filter(LicenseKey.key == key).first()
+        if row is None or row.plan not in KEY_PLANS:
+            return "invalid", None
+        if row.claimed_by is not None:
+            return "used", None
+        key_id, plan = row.id, row.plan
+
+        # Single-statement claim: only one concurrent caller can win this row.
+        res = db.execute(
+            update(LicenseKey)
+            .where(LicenseKey.id == key_id, LicenseKey.claimed_by.is_(None))
+            .values(claimed_by=user_id, claimed_at=now))
+        if res.rowcount != 1:
+            db.rollback()
+            return "used", None
+
+        duration = KEY_PLANS[plan]
+        access = (db.query(KeyAccess)
+                    .filter(KeyAccess.user_id == user_id,
+                            KeyAccess.guild_id == guild_id,
+                            KeyAccess.active.is_(True))
+                    .first())
+        if access:
+            prev_expiry       = aware(access.expires_at)
+            new_expiry        = max(now, prev_expiry) + duration   # stack on remaining time
+            access.expires_at = new_expiry
+            created_new       = False
+        else:
+            prev_expiry = None
+            new_expiry  = now + duration
+            access      = KeyAccess(user_id=user_id, guild_id=guild_id,
+                                    expires_at=new_expiry, active=True)
+            db.add(access)
+            created_new = True
+        db.flush()
+        access_id = access.id
+        db.commit()
+        return "ok", {"key_id": key_id, "plan": plan, "access_id": access_id,
+                      "expires_at": new_expiry, "prev_expiry": prev_expiry,
+                      "created_new": created_new}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def db_undo_claim(info: dict):
+    """Put a key back if the role could not be granted, so the buyer never loses it."""
+    db = SessionLocal()
+    try:
+        db.execute(update(LicenseKey).where(LicenseKey.id == info["key_id"])
+                   .values(claimed_by=None, claimed_at=None))
+        if info["created_new"]:
+            db.execute(delete(KeyAccess).where(KeyAccess.id == info["access_id"]))
+        else:
+            db.execute(update(KeyAccess).where(KeyAccess.id == info["access_id"])
+                       .values(expires_at=info["prev_expiry"]))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def db_due_access(limit: int = 50) -> list:
+    db = SessionLocal()
+    try:
+        rows = (db.query(KeyAccess)
+                  .filter(KeyAccess.active.is_(True), KeyAccess.expires_at <= utcnow())
+                  .order_by(KeyAccess.expires_at.asc()).limit(limit).all())
+        return [(r.id, r.user_id, r.guild_id) for r in rows]
+    finally:
+        db.close()
+
+def db_deactivate_if_due(access_id: int) -> bool:
+    """True only if this call flipped a genuinely expired row — guards against a
+    claim that extended the window between the scan and the revoke."""
+    db = SessionLocal()
+    try:
+        res = db.execute(
+            update(KeyAccess)
+            .where(KeyAccess.id == access_id, KeyAccess.active.is_(True),
+                   KeyAccess.expires_at <= utcnow())
+            .values(active=False))
+        db.commit()
+        return res.rowcount == 1
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def db_reactivate(access_id: int):
+    db = SessionLocal()
+    try:
+        db.execute(update(KeyAccess).where(KeyAccess.id == access_id).values(active=True))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
 
 # ── Core generate logic ────────────────────────────────────────────────────
 async def do_generate(interaction: discord.Interaction, account_type: str, region: str = None):
@@ -388,6 +554,8 @@ class CredBot(discord.Client):
         await self.send_or_update_panel()
         if not self.refresh_stock.is_running():
             self.refresh_stock.start()
+        if not self.expire_access.is_running():
+            self.expire_access.start()
 
     async def update_stock_channel(self, total: int = None):
         if not VOICE_CHANNEL_ID:
@@ -449,6 +617,63 @@ class CredBot(discord.Client):
     async def before_refresh(self):
         await self.wait_until_ready()
 
+    # ── Tracker key expiry ────────────────────────────────────────────────
+    @tasks.loop(seconds=60)
+    async def expire_access(self):
+        try:
+            due = await asyncio.to_thread(db_due_access)
+        except Exception as e:
+            print(f"[!] Key expiry scan failed: {e}")
+            return
+        for access_id, user_id, guild_id in due:
+            try:
+                await self.revoke_access(access_id, user_id, guild_id)
+            except Exception as e:
+                print(f"[!] Revoke failed for {user_id}: {e}")
+
+    @expire_access.before_loop
+    async def before_expire(self):
+        await self.wait_until_ready()
+
+    async def revoke_access(self, access_id: int, user_id: int, guild_id: int):
+        # Flip the row first; only continue if it really is expired right now.
+        if not await asyncio.to_thread(db_deactivate_if_due, access_id):
+            return
+
+        guild = self.get_guild(guild_id)
+        if guild is None:
+            print(f"[keys] Guild {guild_id} unavailable — access {access_id} closed")
+            return
+
+        try:
+            member = await guild.fetch_member(user_id)
+        except discord.NotFound:
+            print(f"[keys] {user_id} left the server — access {access_id} closed")
+            return
+        except discord.HTTPException as e:
+            print(f"[!] Could not fetch member {user_id}: {e} — will retry")
+            await asyncio.to_thread(db_reactivate, access_id)
+            return
+
+        role = guild.get_role(TRACKER_ROLE_ID)
+        if role is not None and role in member.roles:
+            try:
+                await member.remove_roles(role, reason="Tracker key expired")
+            except discord.HTTPException as e:  # includes Forbidden
+                print(f"[!] Could not remove role from {user_id}: {e} — will retry")
+                await asyncio.to_thread(db_reactivate, access_id)
+                return
+        print(f"[keys] Tracker Access expired for {user_id}")
+
+        text = "Your **Tracker Access** key has run out and the role has been removed."
+        text += (f"\nGet a new key here: {SHOP_URL}" if SHOP_URL
+                 else "\nPurchase a new key to get access back.")
+        try:
+            await member.send(embed=discord.Embed(
+                title="Your key is over", description=text, color=0x7C3AED))
+        except discord.HTTPException:
+            print(f"[keys] Could not DM {user_id} (DMs closed)")
+
 
 client = CredBot()
 
@@ -477,4 +702,81 @@ async def gen_dump(interaction: discord.Interaction, region: str = None):
     await do_generate(interaction, "dump", region)
 
 client.tree.add_command(generate_group)
+
+
+# ── Tracker key commands ───────────────────────────────────────────────────
+@app_commands.command(name="claim_key", description="Redeem a Tracker Access key")
+@app_commands.describe(key="Your key, e.g. TRK-D-ABCD-EFGH-JKLM")
+@app_commands.guild_only()
+async def claim_key(interaction: discord.Interaction, key: str):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    role  = guild.get_role(TRACKER_ROLE_ID) if guild else None
+    if role is None:
+        print(f"[!] Tracker role {TRACKER_ROLE_ID} not found in guild")
+        await interaction.followup.send(
+            "The Tracker Access role could not be found. Please contact staff.", ephemeral=True)
+        return
+
+    try:
+        status, info = await asyncio.to_thread(
+            db_claim_key, interaction.user.id, guild.id, key)
+    except Exception as e:
+        print(f"[!] Key claim DB error: {e}")
+        await interaction.followup.send(
+            "Something went wrong checking that key. Please try again in a moment.", ephemeral=True)
+        return
+
+    if status == "invalid":
+        await interaction.followup.send("That key isn't valid. Check it and try again.", ephemeral=True)
+        return
+    if status == "used":
+        await interaction.followup.send("That key has already been used.", ephemeral=True)
+        return
+
+    try:
+        await interaction.user.add_roles(role, reason=f"Tracker key claimed ({info['plan']})")
+    except discord.HTTPException as e:  # includes Forbidden
+        print(f"[!] Could not give role to {interaction.user.id}: {e}")
+        try:
+            await asyncio.to_thread(db_undo_claim, info)
+        except Exception as undo_err:
+            print(f"[!] CRITICAL: could not release key_id {info['key_id']}: {undo_err}")
+        await interaction.followup.send(
+            "I couldn't give you the role, but your key has **not** been used. "
+            "Please contact staff.", ephemeral=True)
+        return
+
+    ts = int(info["expires_at"].timestamp())
+    print(f"[keys] {interaction.user.id} claimed a {info['plan']} key — "
+          f"expires {info['expires_at'].isoformat()}")
+    embed = discord.Embed(
+        title="Tracker Access unlocked",
+        description=f"Plan: **{info['plan'].title()}**\nExpires: <t:{ts}:F> (<t:{ts}:R>)",
+        color=0x7C3AED)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@app_commands.command(name="genkey", description="(Admin) Create Tracker Access keys")
+@app_commands.describe(plan="Key length", amount="How many keys (1-25)")
+@app_commands.choices(plan=[app_commands.Choice(name="Day", value="day"),
+                            app_commands.Choice(name="Week", value="week")])
+@app_commands.default_permissions(administrator=True)
+@app_commands.guild_only()
+async def genkey(interaction: discord.Interaction, plan: app_commands.Choice[str],
+                 amount: app_commands.Range[int, 1, 25] = 1):
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("Admins only.", ephemeral=True)
+        return
+    try:
+        keys = await asyncio.to_thread(db_create_keys, plan.value, amount)
+    except Exception as e:
+        print(f"[!] genkey failed: {e}")
+        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
+        return
+    await interaction.response.send_message(
+        f"**{amount} × {plan.name}** key(s):\n```\n" + "\n".join(keys) + "\n```", ephemeral=True)
+
+client.tree.add_command(claim_key)
+client.tree.add_command(genkey)
 client.run(TOKEN)
