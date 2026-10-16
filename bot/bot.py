@@ -8,9 +8,11 @@ import io
 import secrets
 import time
 import json
+import re
 from dotenv import load_dotenv
 from sqlalchemy import (create_engine, Column, Integer, BigInteger, Boolean,
-                        String, DateTime, Text, update, delete)
+                        String, DateTime, Text, update, delete, or_,
+                        text as sql_text)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker, declarative_base
 from cryptography.fernet import Fernet, InvalidToken
@@ -1037,8 +1039,122 @@ async def revoke_user_cmd(interaction: discord.Interaction, user: discord.Member
         ephemeral=True)
 
 
+# ── Order lookup (owners) ───────────────────────────────────────────────────
+ORDER_REF_RE = re.compile(r"cs_(?:test|live)_[A-Za-z0-9]{10,200}")
+
+def order_search_terms(raw: str):
+    """(order ref, key) to match. A quoted ID or a pasted receipt link still works."""
+    q = raw.strip().strip("`'\"<>")
+    m = ORDER_REF_RE.search(q)
+    return (m.group(0) if m else q), q.upper()
+
+def db_find_order(raw: str):
+    """Find a sold key by its order ID or by the key itself. A dict, or None if nothing matches."""
+    ref, key = order_search_terms(raw)
+    if not key:
+        return None
+    db = SessionLocal()
+    try:
+        row = (db.query(LicenseKey)
+                 .filter(or_(LicenseKey.order_ref == ref, LicenseKey.key == key))
+                 .first())
+        if row is None:
+            return None
+        info = {"id": row.id, "key": row.key, "plan": row.plan, "order_ref": row.order_ref,
+                "created_at": aware(row.created_at), "claimed_by": row.claimed_by,
+                "claimed_at": aware(row.claimed_at), "buyer_email": row.buyer_email, "pay": None}
+        try:   # the shop adds these columns, so they can be missing until it has started once
+            r = db.execute(
+                sql_text("SELECT pay_currency, pay_subtotal, pay_tax, pay_discount, pay_total "
+                         "FROM license_keys WHERE id = :id"), {"id": info["id"]}).first()
+            if r is not None and r[4] is not None:
+                info["pay"] = {"currency": r[0], "subtotal": r[1], "tax": r[2],
+                               "discount": r[3], "total": r[4]}
+        except Exception as e:
+            db.rollback()
+            print(f"[keys] payment columns not readable yet: {e}")
+        return info
+    finally:
+        db.close()
+
+def money_text(cents: int, currency) -> str:
+    cur    = (currency or "usd").lower()
+    amount = f"{abs(cents) / 100:,.2f}"
+    symbol = {"usd": "$", "gbp": "£", "eur": "€"}.get(cur)
+    shown  = f"{symbol}{amount}" if symbol else f"{amount} {cur.upper()}"
+    return f"-{shown}" if cents < 0 else shown
+
+def discord_time(dt) -> str:
+    return f"<t:{int(dt.timestamp())}:f>" if dt else "unknown"
+
+def order_source(order_ref) -> str:
+    """Where a key came from: a Stripe order, an owner's /gen, or /genkey."""
+    if not order_ref:
+        return "Created with /genkey"
+    if order_ref.startswith("owner:"):
+        parts = order_ref.split(":")
+        who = f"<@{parts[1]}>" if len(parts) == 3 and parts[1].isdigit() else "an owner"
+        return f"Issued by {who} with /gen keylicense"
+    return f"Website order\n`{order_ref}`"
+
+@app_commands.command(name="order", description="(Owner) Look up an order by its order ID or key")
+@app_commands.describe(order_id="The order ID from the buyer (starts with cs_), or the key itself")
+@app_commands.guild_only()
+async def order_lookup(interaction: discord.Interaction, order_id: str):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        info = await asyncio.to_thread(db_find_order, order_id)
+    except Exception as e:
+        print(f"[!] /order failed: {e}")
+        await interaction.followup.send("I couldn't search the orders. Check the bot logs.",
+                                        ephemeral=True)
+        return
+    print(f"[keys] {interaction.user.id} ran /order -> {'found' if info else 'no match'}")
+    if info is None:
+        await interaction.followup.send(
+            "No order or key matches that. Check the ID and try again.", ephemeral=True)
+        return
+
+    if info["claimed_by"] == REVOKED_BY:
+        status = "Revoked, it can't be redeemed"
+    elif info["claimed_by"] is not None:
+        status = (f"Redeemed by <@{info['claimed_by']}>"
+                  + (f" on {discord_time(info['claimed_at'])}" if info["claimed_at"] else ""))
+    else:
+        status = "Not redeemed yet"
+
+    pay = info["pay"]
+    if pay:
+        lines = []
+        if pay["subtotal"] is not None:
+            lines.append(f"Subtotal: {money_text(pay['subtotal'], pay['currency'])}")
+        if pay["discount"]:
+            lines.append(f"Discount: {money_text(-pay['discount'], pay['currency'])}")
+        if pay["tax"]:
+            lines.append(f"Tax / VAT: {money_text(pay['tax'], pay['currency'])}")
+        lines.append(f"**Total: {money_text(pay['total'], pay['currency'])} "
+                     f"{(pay['currency'] or 'usd').upper()}**")
+        payment = "\n".join(lines)
+    else:
+        payment = "No amounts saved for this key."
+
+    embed = discord.Embed(title="Order lookup", color=0x7C3AED)
+    embed.add_field(name="Source", value=order_source(info["order_ref"]), inline=False)
+    embed.add_field(name="Key", value=f"```\n{info['key']}\n```", inline=False)
+    embed.add_field(name="Plan", value=PLAN_LABELS.get(info["plan"], info["plan"]), inline=True)
+    embed.add_field(name="Created", value=discord_time(info["created_at"]), inline=True)
+    embed.add_field(name="Status", value=status, inline=False)
+    embed.add_field(name="Payment", value=payment, inline=False)
+    if info["buyer_email"]:
+        embed.add_field(name="Buyer email", value=info["buyer_email"], inline=False)
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
 client.tree.add_command(claim_key)
 client.tree.add_command(genkey)
 client.tree.add_command(owner_gen)
 client.tree.add_command(owner_revoke)
+client.tree.add_command(order_lookup)
 client.run(TOKEN)
