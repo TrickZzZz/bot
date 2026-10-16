@@ -57,12 +57,12 @@ STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
 SITE_URL              = _env("SITE_URL").rstrip("/")
 SUPPORT_URL           = _env("SUPPORT_URL")
 
-# Prices are in US cents (Stripe's minimum charge is 50 cents). Must match the
+# Prices are in pence (Stripe's minimum GBP charge is 30p). Must match the
 # plan names the bot understands ("day", "week").
-CURRENCY = "usd"
+CURRENCY = "gbp"
 PLANS = {
-    "day":  {"name": "1 day",  "label": "1-day key", "cents": 50,  "days": 1},
-    "week": {"name": "7 days", "label": "7-day key", "cents": 200, "days": 7},
+    "day":  {"name": "1 day",  "label": "1-day key", "pence": 50,  "days": 1},
+    "week": {"name": "7 days", "label": "7-day key", "pence": 200, "days": 7},
 }
 # Bump this date whenever the wording on /terms changes. It is saved on every payment.
 TOS_VERSION = "2026-10-16"
@@ -70,8 +70,8 @@ KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I lookalikes
 SESSION_ID_RE = re.compile(r"^cs_(test|live)_[A-Za-z0-9]{10,200}$")
 
 
-def price_text(cents: int) -> str:
-    return f"${cents / 100:.2f}"
+def price_text(pence: int) -> str:
+    return money(pence, CURRENCY)
 
 
 # ── Database (table definition mirrors bot/bot.py) ─────────────────────────
@@ -94,7 +94,7 @@ class LicenseKey(Base):
     claimed_by = Column(BigInteger, nullable=True)
     claimed_at = Column(DateTime(timezone=True), nullable=True)
     buyer_email = Column(String(320), nullable=True)
-    # What Stripe charged, in minor units (cents). Saved when the order is fulfilled.
+    # What Stripe charged, in minor units (pence). Saved when the order is fulfilled.
     pay_currency = Column(String(8), nullable=True)
     pay_subtotal = Column(Integer, nullable=True)
     pay_tax      = Column(Integer, nullable=True)
@@ -322,8 +322,8 @@ async def read_form(request: Request, limit: int = 4096) -> dict:
 def index(request: Request):
     plans = [{
         "id": pid, "name": p["name"], "label": p["label"], "days": p["days"],
-        "price": price_text(p["cents"]),
-        "per_day": price_text(round(p["cents"] / p["days"])),
+        "price": price_text(p["pence"]),
+        "per_day": price_text(round(p["pence"] / p["days"])),
     } for pid, p in PLANS.items()]
     return render(request, "index.html", plans=plans, checkout_ready=bool(STRIPE_SECRET_KEY))
 
@@ -361,7 +361,7 @@ async def buy(request: Request, plan_id: str):
                 "quantity": 1,
                 "price_data": {
                     "currency": CURRENCY,
-                    "unit_amount": plan["cents"],
+                    "unit_amount": plan["pence"],
                     "product_data": {
                         "name": f"Tracker Access: {plan['name']}",
                         "description": "Redeem in Discord with /claim_key",
