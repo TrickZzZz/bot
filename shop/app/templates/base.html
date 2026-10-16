@@ -7,20 +7,20 @@
   <meta name="color-scheme" content="dark">
   <title>{% block title %}Tracker Access keys{% endblock %}</title>
   <meta name="description" content="Buy a 1-day or 7-day Tracker Access key and redeem it in Discord with /claim_key.">
-  <link rel="icon" type="image/png" href="/static/favicon.png">
-  <link rel="apple-touch-icon" href="/static/favicon.png">
+  <link rel="icon" type="image/png" href="{{ asset('favicon.png') }}">
+  <link rel="apple-touch-icon" href="{{ asset('favicon.png') }}">
   {% block head %}{% endblock %}
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="{{ asset('style.css') }}">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
   <header class="top">
     <nav class="nav" aria-label="Main">
       <a class="mark" href="/">
-        <img src="/static/logo.png" width="175" height="96" alt="">
+        <img src="{{ asset('logo.png') }}" width="175" height="96" alt="">
         Tracker Access
       </a>
       <div class="nav-links">
@@ -48,6 +48,6 @@
       {% if support_url %}<a href="{{ support_url }}" rel="noopener">Discord</a>{% endif %}
     </nav>
   </footer>
-  <script src="/static/app.js" defer></script>
+  <script src="{{ asset('app.js') }}" defer></script>
 </body>
 </html>

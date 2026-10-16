@@ -11,6 +11,7 @@ Environment:
   SUPPORT_URL            Discord invite shown on the site (optional)
   LOG_LEVEL              default INFO
 """
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import secrets
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
+from functools import cache
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -275,6 +277,22 @@ app = FastAPI(title="Tracker Access shop", lifespan=lifespan,
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
+
+@cache
+def asset(path: str) -> str:
+    """URL for a file under /static with a short hash of its contents on the end.
+    When a file changes its URL changes, so a browser can never pair a new page with
+    an old cached copy of its stylesheet or script. Files don't change while the
+    server is running, so each hash is worked out once."""
+    try:
+        digest = hashlib.sha256((BASE_DIR / "static" / path).read_bytes()).hexdigest()[:10]
+    except OSError:
+        return f"/static/{path}"
+    return f"/static/{path}?v={digest}"
+
+
+templates.env.globals["asset"] = asset
+
 CSP = ("default-src 'self'; style-src 'self' https://fonts.googleapis.com; "
        "font-src https://fonts.gstatic.com; img-src 'self' data:; script-src 'self'; "
        "form-action 'self' https://checkout.stripe.com; frame-ancestors 'none'; "
@@ -289,6 +307,10 @@ async def security_headers(request: Request, call_next):
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
     resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
+    if request.url.path.startswith("/static/"):
+        # Check with the server on every visit (a cheap 304 when nothing changed)
+        # instead of letting a browser guess how long a file stays fresh.
+        resp.headers.setdefault("Cache-Control", "no-cache")
     return resp
 
 

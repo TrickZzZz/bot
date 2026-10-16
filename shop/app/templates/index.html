@@ -49,7 +49,7 @@
     <div class="reel-track" data-reel-track>
       {% for file, w, h, alt in loot %}
       <div class="reel-slide" role="group" aria-roledescription="slide" aria-label="{{ loop.index }} of {{ loop.length }}">
-        <a href="/static/loot/{{ file }}" target="_blank" rel="noopener"><img src="/static/loot/{{ file }}" width="{{ w }}" height="{{ h }}" alt="{{ alt }}" decoding="async"{% if loop.index > 2 %} loading="lazy"{% endif %}></a>
+        <a href="{{ asset('loot/' ~ file) }}" target="_blank" rel="noopener"><img src="{{ asset('loot/' ~ file) }}" width="{{ w }}" height="{{ h }}" alt="{{ alt }}" decoding="async"{% if loop.index > 2 %} loading="lazy"{% endif %}></a>
       </div>
       {% endfor %}
     </div>
