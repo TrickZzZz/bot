@@ -60,12 +60,15 @@ SITE_URL              = _env("SITE_URL").rstrip("/")
 SUPPORT_URL           = _env("SUPPORT_URL")
 
 # Prices are in pence (Stripe's minimum GBP charge is 30p). Must match the
-# plan names the bot understands ("day", "week").
+# plan names the bot understands ("day", "week", "month"), and "days" must match
+# the length the bot gives that plan.
 CURRENCY = "gbp"
 PLANS = {
-    "day":  {"name": "1 day",  "label": "1-day key", "pence": 50,  "days": 1},
-    "week": {"name": "7 days", "label": "7-day key", "pence": 200, "days": 7},
+    "day":   {"name": "1 day",   "label": "1-day key",  "pence": 50,  "days": 1},
+    "week":  {"name": "7 days",  "label": "7-day key",  "pence": 200, "days": 7},
+    "month": {"name": "30 days", "label": "30-day key", "pence": 500, "days": 30},
 }
+DEFAULT_PLAN = "week"   # what the dropdown shows before anyone picks
 # Bump this date whenever the wording on /terms changes. It is saved on every payment.
 TOS_VERSION = "2026-10-16"
 KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I lookalikes
@@ -342,12 +345,17 @@ async def read_form(request: Request, limit: int = 4096) -> dict:
 
 @app.get("/")
 def index(request: Request):
+    # The plan that costs least per day gets the "Best value" tag.
+    best = min(PLANS, key=lambda pid: PLANS[pid]["pence"] / PLANS[pid]["days"])
     plans = [{
         "id": pid, "name": p["name"], "label": p["label"], "days": p["days"],
         "price": price_text(p["pence"]),
         "per_day": price_text(round(p["pence"] / p["days"])),
+        "best": pid == best and len(PLANS) > 1,
     } for pid, p in PLANS.items()]
-    return render(request, "index.html", plans=plans, checkout_ready=bool(STRIPE_SECRET_KEY))
+    default_plan = DEFAULT_PLAN if DEFAULT_PLAN in PLANS else next(iter(PLANS))
+    return render(request, "index.html", plans=plans, default_plan=default_plan,
+                  checkout_ready=bool(STRIPE_SECRET_KEY))
 
 
 @app.get("/terms")
@@ -358,13 +366,26 @@ def terms(request: Request):
 
 @app.post("/buy/{plan_id}")
 async def buy(request: Request, plan_id: str):
+    """Start checkout for the key length named in the URL."""
+    return await start_checkout(request, plan_id)
+
+
+@app.post("/buy")
+async def buy_selected(request: Request):
+    """Start checkout for the key length picked in the dropdown (the form's `plan` field)."""
+    form = await read_form(request)
+    return await start_checkout(request, form.get("plan", ""), form)
+
+
+async def start_checkout(request: Request, plan_id: str, form: dict | None = None):
     plan = PLANS.get(plan_id)
     if plan is None:
         return message(request, "Unknown key", "That key length doesn't exist. Pick one from the shop.", 404)
     if not STRIPE_SECRET_KEY:
         return message(request, "Checkout isn't ready",
                        "Payments aren't switched on yet. Check back soon.", 503)
-    form = await read_form(request)
+    if form is None:
+        form = await read_form(request)
     if form.get("agree") != "yes":
         return message(request, "Agree to the terms first",
                        "Tick the box to accept the terms of service, then choose your key again.", 400)

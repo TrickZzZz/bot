@@ -39,13 +39,14 @@
   ("loot-4.webp", 583, 876, "Nearby loot grid of M4A1 rifles, flare guns, R700 and TFZ98S rifles, .338 magazines and ammo."),
   ("loot-5.webp", 1400, 694, "Gear screen with a chest rig holding 23,994 rubles and .338 ammo, AS Val rifles equipped, and flare guns filling the shirt and pants slots."),
   ("loot-6.webp", 563, 448, "Backpack grid filled with flare guns."),
+  ("loot-7.webp", 1400, 679, "Inventory and gear screen with IOTV Gen 4 armour, Fast MT helmets, M4A1 rifles and a TFZ98S in the chest rig, shirt and pants slots, 116,100 rubles, and a nearby grid full of flare guns and R700 rifles."),
 ] %}
 <section id="loot" aria-labelledby="loot-h">
   <div class="section-head">
     <h2 id="loot-h">Loot made with Tracker Access</h2>
     <p>Screenshots of inventories and stashes collected with the tracker. Select one to open it full size.</p>
   </div>
-  <div class="reel" data-reel data-interval="4500" role="group" aria-roledescription="carousel" aria-label="Loot screenshots">
+  <div class="reel" data-reel data-hold="1500" role="group" aria-roledescription="carousel" aria-label="Loot screenshots">
     <div class="reel-track" data-reel-track>
       {% for file, w, h, alt in loot %}
       <div class="reel-slide" role="group" aria-roledescription="slide" aria-label="{{ loop.index }} of {{ loop.length }}">
@@ -71,7 +72,7 @@
     <h2 id="plans-h">Choose a key</h2>
     <p>One payment per key. No subscription.</p>
   </div>
-  <form class="buy-form" method="post">
+  <form class="buy-form" method="post" action="/buy">
   <div class="terms">
     <h3 class="terms-title">Before you buy</h3>
     <p class="terms-text">All sales on this website are final. We can't give refunds for purchases made here or for lost keys. If you have any issue, you'll need to contact us by opening a support ticket in {% if support_url %}<a href="{{ support_url }}" rel="noopener">our Discord</a>{% else %}our Discord{% endif %}.</p>
@@ -81,24 +82,20 @@
     </label>
     <p class="terms-hint" data-terms-hint>Tick the box to switch on checkout.</p>
   </div>
-  <ul class="plans">
-    {% for p in plans %}
-    <li class="plan{% if p.days > 1 %} feat{% endif %}">
-      <div class="plan-top">
-        <h3 class="plan-name">{{ p.name }}</h3>
-        {% if p.days > 1 %}<span class="badge">Best value</span>{% endif %}
+  <div class="picker">
+    <label class="picker-label" id="plan-label" for="plan">Key length</label>
+    <div class="picker-row">
+      <div class="dd" data-dd>
+        <select class="dd-native" id="plan" name="plan">
+          {% for p in plans %}
+          <option value="{{ p.id }}" data-name="{{ p.name }}" data-price="{{ p.price }}" data-label="{{ p.label }}" data-note="{% if p.days > 1 %}{{ p.per_day }} a day{% else %}One day of access{% endif %}"{% if p.best %} data-best{% endif %}{% if p.id == default_plan %} selected{% endif %}>{{ p.name }} ({{ p.price }})</option>
+          {% endfor %}
+        </select>
       </div>
-      <div>
-        <p class="plan-price">{{ p.price }}</p>
-        <p class="plan-note">{% if p.days > 1 %}{{ p.per_day }} a day{% else %}One day of access{% endif %}</p>
-      </div>
-      <div class="span" role="img" aria-label="{{ p.name }} of access, out of a possible 7 days">
-        {% for i in range(7) %}<span class="slot{% if i < p.days %} on{% endif %}"></span>{% endfor %}
-      </div>
-      <button type="submit" formaction="/buy/{{ p.id }}" data-busy="Opening checkout…" {% if not checkout_ready %}disabled{% endif %}>Buy {{ p.label }}</button>
-    </li>
-    {% endfor %}
-  </ul>
+      <button type="submit" class="solid buy-btn" data-busy="Opening checkout…" {% if not checkout_ready %}disabled{% endif %}>Buy key</button>
+    </div>
+    <p class="picker-note">Your time starts when you run <code>/claim_key</code>, not when you pay.</p>
+  </div>
   </form>
   {% if not checkout_ready %}
   <p class="notice">Checkout isn't switched on yet. Check back soon.</p>

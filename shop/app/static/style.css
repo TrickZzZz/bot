@@ -148,8 +148,7 @@ h2 { font-weight: 700; font-size: clamp(1.5rem, 3.6vw, 2rem); line-height: 1.2; 
 .btn-ghost, button.ghost { background: transparent; color: var(--text); border-color: var(--line); }
 .btn-ghost:hover, button.ghost:hover { color: var(--text); border-color: var(--fuchsia); }
 button:disabled { background: var(--surface-2); color: var(--muted); box-shadow: none; cursor: not-allowed; border-color: var(--line); }
-.plan button { width: 100%; }
-.buy-form.busy .plan button { pointer-events: none; filter: brightness(0.85); }
+.buy-form.busy .buy-btn, .buy-form.busy .dd-trigger { pointer-events: none; filter: brightness(0.85); }
 
 /* Hero */
 .hero { display: grid; gap: 2.5rem; align-items: center; padding-block: 3.5rem 0.5rem; }
@@ -189,26 +188,66 @@ button:disabled { background: var(--surface-2); color: var(--muted); box-shadow:
 .demo-reply span { color: var(--muted); font-size: 0.9rem; }
 .demo-note { margin: 0; color: var(--muted); font-size: 0.85rem; }
 
-/* Keys */
-.plans { list-style: none; margin: 0; padding: 0; display: grid; gap: 1.25rem; }
-@media (min-width: 720px) { .plans { grid-template-columns: repeat(2, 1fr); } }
-.plan {
-  display: flex; flex-direction: column; gap: 1.5rem;
-  padding: 1.75rem;
-  background: var(--surface);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-}
-.plan.feat {
-  border-color: var(--fuchsia);
-  background: linear-gradient(180deg, rgba(217, 70, 239, 0.1), var(--surface) 60%);
-  box-shadow: 0 24px 70px -30px var(--glow);
-}
-.plan-top { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
-.plan-name { font-weight: 600; font-size: 1.1rem; }
+/* Key length picker. It is a real <select> in the form; app.js swaps it on screen for
+   the styled list below, so without JavaScript the plain select still works. */
+.picker-label { display: block; margin-bottom: 0.6rem; font-weight: 600; }
+.picker-row { display: grid; gap: 0.75rem; }
+@media (min-width: 640px) { .picker-row { grid-template-columns: minmax(0, 26rem) max-content; justify-content: start; gap: 1rem; } }
+.picker-note { margin: 0.75rem 0 0; color: var(--muted); font-size: 0.92rem; }
+.buy-btn { min-height: 3.5rem; min-width: 13rem; padding-inline: 2rem; white-space: nowrap; }
+
 .badge { padding: 0.2rem 0.7rem; border-radius: 999px; background: var(--fuchsia); color: #1A0620; font-size: 0.8rem; font-weight: 700; }
-.plan-price { margin: 0; font-weight: 800; font-size: 3rem; line-height: 1; letter-spacing: -0.04em; }
-.plan-note { margin: 0.5rem 0 0; color: var(--muted); font-size: 0.95rem; }
+
+.dd { position: relative; }
+.dd-native {
+  display: block; width: 100%; min-height: 4.25rem; padding: 0 3rem 0 1rem;
+  font: inherit; font-weight: 600; color: var(--text);
+  background-color: var(--surface);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath d='M5 7.5l5 5 5-5' fill='none' stroke='%23D946EF' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 1rem center; background-size: 1.1rem;
+  border: 1px solid var(--line); border-radius: 14px;
+  appearance: none; cursor: pointer;
+}
+.dd-native[hidden] { display: none; }
+.dd-native:hover, .dd-native:focus-visible { border-color: var(--fuchsia); }
+
+.dd-trigger {
+  width: 100%; justify-content: space-between; gap: 1rem;
+  min-height: 4.25rem; padding: 0.65rem 1rem;
+  font-weight: 400; text-align: left; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+}
+.dd-trigger:hover, .dd.is-open .dd-trigger { border-color: var(--fuchsia); }
+.dd.is-open .dd-trigger { box-shadow: 0 0 0 3px rgba(217, 70, 239, 0.18); }
+.dd-trigger .dd-row { flex: 1; min-width: 0; }
+.dd-chev { flex: none; width: 1.1rem; height: 1.1rem; color: var(--fuchsia); transition: transform 0.15s ease; }
+.dd.is-open .dd-chev { transform: rotate(180deg); }
+
+/* One key length: name and tag, a short note, and the price on the right. */
+.dd-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "name price" "note price";
+  column-gap: 1rem; align-items: center; text-align: left;
+}
+.dd-main { grid-area: name; display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem 0.6rem; }
+.dd-name { font-weight: 600; font-size: 1.05rem; }
+.dd-note { grid-area: note; color: var(--muted); font-size: 0.88rem; }
+.dd-price { grid-area: price; font-weight: 800; font-size: 1.4rem; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+
+.dd-list {
+  position: absolute; z-index: 20; inset-inline: 0; top: calc(100% + 6px);
+  margin: 0; padding: 0.35rem; list-style: none;
+  background: var(--surface-2); border: 1px solid rgba(217, 70, 239, 0.55); border-radius: 14px;
+  box-shadow: 0 28px 60px -20px rgba(0, 0, 0, 0.85), 0 0 46px -20px var(--glow);
+  animation: dd-in 0.14s ease-out;
+}
+.dd-list[hidden] { display: none; }
+.dd-list:focus { outline: none; }
+.dd.dd-up .dd-list { top: auto; bottom: calc(100% + 6px); }
+.dd-list [role="option"] { padding: 0.7rem 0.8rem; border-radius: 10px; cursor: pointer; }
+.dd-list [role="option"].is-active { background: rgba(217, 70, 239, 0.14); }
+.dd-list [role="option"][aria-selected="true"] { box-shadow: inset 3px 0 0 var(--fuchsia); }
+@keyframes dd-in { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
 
 /* Seven slots, one per day of access */
 .span { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
@@ -229,8 +268,8 @@ button:disabled { background: var(--surface-2); color: var(--muted); box-shadow:
 .slot:nth-child(7).on { animation-delay: 0.52s; }
 @keyframes fill { from { transform: scaleX(0); opacity: 0; } to { transform: scaleX(1); opacity: 1; } }
 
-/* Loot reel: a strip of screenshots that moves on by itself and can be swiped.
-   Every frame is the same height; its width follows the picture. */
+/* Loot reel. Without JavaScript: a plain row of screenshots you can scroll, all the same
+   height. With JavaScript it becomes a fading show in one spot (see "Fade mode" below). */
 .reel { --reel-h: clamp(16rem, 70vw, 26rem); }
 .reel-track {
   position: relative;
@@ -268,6 +307,32 @@ button:disabled { background: var(--surface-2); color: var(--muted); box-shadow:
 .reel-ctl { display: flex; gap: 0.5rem; }
 .reel .reel-btn { min-width: 2.75rem; padding: 0 1rem; }
 .reel-btn svg { width: 1.1rem; height: 1.1rem; }
+
+/* Fade mode (app.js adds .is-fade): the pictures sit on top of each other in one frame
+   and fade from one to the next. The frame never changes size; each picture is centred
+   in it at the largest size that fits. The old picture stays solid underneath while the
+   new one fades in (.was-on), so the frame never dips to empty halfway. */
+.reel.is-fade { max-width: 52rem; }
+.reel.is-fade .reel-track {
+  display: block; position: relative; overflow: hidden;
+  aspect-ratio: 3 / 2; padding: 0; scroll-snap-type: none;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+  transition: border-color 0.15s ease;
+}
+.reel.is-fade .reel-track:hover { border-color: rgba(217, 70, 239, 0.55); }
+@media (min-width: 720px) { .reel.is-fade .reel-track { aspect-ratio: 2 / 1; } }
+.reel.is-fade .reel-slide {
+  position: absolute; inset: 0; height: auto;
+  border: 0; border-radius: 0; background: transparent;
+  opacity: 0; visibility: hidden;
+}
+.reel.is-fade .reel-slide.was-on { opacity: 1; visibility: visible; z-index: 1; }
+.reel.is-fade .reel-slide.is-on { opacity: 1; visibility: visible; z-index: 2; transition: opacity 0.6s ease; }
+.reel.is-fade .reel-slide a { position: absolute; inset: 0; display: block; }
+.reel.is-fade .reel-slide img {
+  position: absolute; inset: 0; margin: auto;
+  width: auto; height: auto; max-width: 100%; max-height: 100%;
+}
 
 .notice {
   margin: 1rem 0 0; padding: 0.8rem 1rem;
@@ -394,5 +459,7 @@ footer nav a:hover { color: var(--text); }
   .slot.on { animation: none; }
   .btn, button { transition: none; }
   .reel-track { scroll-behavior: auto; }
-  .reel-slide { transition: none; }
+  .reel-slide, .reel.is-fade .reel-slide.is-on, .reel.is-fade .reel-track { transition: none; }
+  .dd-list { animation: none; }
+  .dd-chev { transition: none; }
 }
