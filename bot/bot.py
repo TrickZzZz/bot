@@ -138,7 +138,7 @@ class Account(Base):
 # ── Tracker keys ───────────────────────────────────────────────────────────
 TRACKER_ROLE_ID = int(os.environ.get("TRACKER_ROLE_ID", "1560565978486673450"))
 SHOP_URL        = os.environ.get("SHOP_URL", "")
-KEY_PLANS       = {"day": timedelta(days=1), "week": timedelta(days=7)}
+KEY_PLANS       = {"day": timedelta(days=1), "week": timedelta(days=7), "month": timedelta(days=30)}
 KEY_ALPHABET    = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I lookalikes
 
 def parse_id_list(raw: str) -> frozenset:
@@ -154,8 +154,8 @@ def parse_id_list(raw: str) -> frozenset:
 # If the variable is set but holds no valid ids, nobody can run them (fails closed).
 OWNER_ROLE_IDS  = parse_id_list(os.environ.get(
     "OWNER_ROLE_IDS", "1518282859524395251,1518288403144245269"))
-OWNER_KEY_PLANS = {"1d": "day", "1w": "week"}     # /gen keylicense choice -> key plan
-PLAN_LABELS     = {"day": "1 day", "week": "1 week"}
+OWNER_KEY_PLANS = {"1d": "day", "1w": "week", "1m": "month"}   # /gen keylicense choice -> key plan
+PLAN_LABELS     = {"day": "1 day", "week": "1 week", "month": "1 month"}
 REVOKED_BY      = 0   # license_keys.claimed_by sentinel: revoked by an owner, never redeemable
 EXTEND_MAX_HOURS = 8760   # /extend limit (one year), so a typo like 100000 can't hand out decades
 EXTEND_DM_GAP    = 0.6    # seconds between DMs when /extend all notifies people, to stay under Discord's limits
@@ -165,7 +165,7 @@ class LicenseKey(Base):
     __tablename__ = "license_keys"
     id         = Column(Integer, primary_key=True)
     key        = Column(String(64), unique=True, nullable=False, index=True)
-    plan       = Column(String(10), nullable=False)             # "day" | "week"
+    plan       = Column(String(10), nullable=False)             # "day" | "week" | "month"
     order_ref  = Column(String(200), unique=True, nullable=True)  # payment session id
     created_at = Column(DateTime(timezone=True), default=utcnow)
     claimed_by = Column(BigInteger, nullable=True)              # Discord user id
@@ -922,7 +922,8 @@ async def claim_key(interaction: discord.Interaction, key: str):
 @app_commands.command(name="genkey", description="(Admin) Create Tracker Access keys")
 @app_commands.describe(plan="Key length", amount="How many keys (1-25)")
 @app_commands.choices(plan=[app_commands.Choice(name="Day", value="day"),
-                            app_commands.Choice(name="Week", value="week")])
+                            app_commands.Choice(name="Week", value="week"),
+                            app_commands.Choice(name="Month", value="month")])
 @app_commands.default_permissions(administrator=True)
 @app_commands.guild_only()
 async def genkey(interaction: discord.Interaction, plan: app_commands.Choice[str],
@@ -967,7 +968,8 @@ owner_gen = app_commands.Group(name="gen", description="Owner tools", guild_only
 @owner_gen.command(name="keylicense", description="(Owner) Create a key and DM it to a user")
 @app_commands.describe(duration="Key length", user="Who the key is for")
 @app_commands.choices(duration=[app_commands.Choice(name="1d (1 day)", value="1d"),
-                                app_commands.Choice(name="1w (1 week)", value="1w")])
+                                app_commands.Choice(name="1w (1 week)", value="1w"),
+                                app_commands.Choice(name="1m (1 month, 30 days)", value="1m")])
 async def gen_keylicense(interaction: discord.Interaction,
                          duration: app_commands.Choice[str], user: discord.Member):
     if not await require_owner(interaction):
