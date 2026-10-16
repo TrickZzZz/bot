@@ -22,14 +22,14 @@
 </section>
 
 <section aria-labelledby="next-h">
-  <h2 id="next-h">Redeem it</h2>
+  <div class="section-head"><h2 id="next-h">Redeem it</h2></div>
   <ol class="steps">
-    <li>Open our Discord server.</li>
-    <li>Run <code>/claim_key</code> and paste your key.</li>
-    <li>Your time starts then. We remove the role and send you a DM when it ends.</li>
+    <li><strong>Open our Discord</strong><p>Join the server if you haven't already.</p></li>
+    <li><strong>Run the command</strong><p>Type <code>/claim_key</code> and paste your key.</p></li>
+    <li><strong>Your time starts</strong><p>We remove the role and send you a DM when it ends.</p></li>
   </ol>
   {% if support_url %}
-  <p><a class="back" href="{{ support_url }}" rel="noopener">Open the Discord</a></p>
+  <p class="actions"><a class="btn btn-primary" href="{{ support_url }}" rel="noopener">Open the Discord</a></p>
   {% endif %}
 </section>
 {% endblock %}

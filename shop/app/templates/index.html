@@ -1,20 +1,52 @@
 {% extends "base.html" %}
 
 {% block main %}
-<section class="intro">
-  <h1>Tracker Access, by the day or the week</h1>
-  <p class="lede">Pay once, copy your key, and redeem it in our Discord with <code>/claim_key</code>. The role comes off by itself when your time runs out.</p>
+<section class="hero" aria-labelledby="hero-h">
+  <div>
+    <h1 id="hero-h">Tracker Access keys, ready in seconds</h1>
+    <p class="lede">Pay by card, copy your key, and run <code>/claim_key</code> in our Discord. The role comes off by itself when your time runs out.</p>
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="#keys">Choose a key</a>
+      {% if support_url %}<a class="btn btn-ghost" href="{{ support_url }}" rel="noopener">Join the Discord</a>{% endif %}
+    </div>
+    <ul class="perks">
+      <li>Your key appears right after payment</li>
+      <li>Secure checkout by Stripe</li>
+      <li>Role removed and a DM sent when time is up</li>
+    </ul>
+  </div>
+
+  <div class="demo" aria-hidden="true">
+    <div class="demo-bar"><span>In Discord</span><span>Example</span></div>
+    <div class="demo-body">
+      <p class="demo-cmd"><b>/claim_key</b> key: TRK-W-XXXX-XXXX-XXXX</p>
+      <div class="demo-reply">
+        <strong>Key claimed</strong>
+        <span>You now have the Tracker Access role.</span>
+      </div>
+      <div class="span">
+        {% for i in range(7) %}<span class="slot on"></span>{% endfor %}
+      </div>
+      <p class="demo-note">One slot for each day of access.</p>
+    </div>
+  </div>
 </section>
 
-<section aria-labelledby="plans-h">
-  <h2 id="plans-h" class="vh">Choose a key</h2>
+<section id="keys" aria-labelledby="plans-h">
+  <div class="section-head">
+    <h2 id="plans-h">Choose a key</h2>
+    <p>One payment per key. No subscription.</p>
+  </div>
   <ul class="plans">
     {% for p in plans %}
-    <li class="plan">
-      <div class="plan-head">
-        <p class="plan-name">{{ p.name }}</p>
+    <li class="plan{% if p.days > 1 %} feat{% endif %}">
+      <div class="plan-top">
+        <h3 class="plan-name">{{ p.name }}</h3>
+        {% if p.days > 1 %}<span class="badge">Best value</span>{% endif %}
+      </div>
+      <div>
         <p class="plan-price">{{ p.price }}</p>
-        {% if p.days > 1 %}<p class="plan-note">{{ p.per_day }} a day</p>{% endif %}
+        <p class="plan-note">{% if p.days > 1 %}{{ p.per_day }} a day{% else %}One day of access{% endif %}</p>
       </div>
       <div class="span" role="img" aria-label="{{ p.name }} of access, out of a possible 7 days">
         {% for i in range(7) %}<span class="slot{% if i < p.days %} on{% endif %}"></span>{% endfor %}
@@ -30,17 +62,30 @@
   {% endif %}
 </section>
 
-<section aria-labelledby="how-h">
-  <h2 id="how-h">How it works</h2>
+<section id="how" aria-labelledby="how-h">
+  <div class="section-head">
+    <h2 id="how-h">How it works</h2>
+  </div>
   <ol class="steps">
-    <li>Pick a key and pay on Stripe's checkout page.</li>
-    <li>Copy your key from the confirmation page.</li>
-    <li>In our Discord, run <code>/claim_key</code> and paste the key. You get the Tracker Access role, and we send you a DM when your time is up.</li>
+    <li>
+      <strong>Pick a key and pay</strong>
+      <p>Checkout runs on Stripe's page, so your card details never touch our site.</p>
+    </li>
+    <li>
+      <strong>Copy your key</strong>
+      <p>It shows on the confirmation page as soon as the payment goes through.</p>
+    </li>
+    <li>
+      <strong>Claim it in Discord</strong>
+      <p>Run <code>/claim_key</code> and paste the key. You get the Tracker Access role, and we DM you when your time is up.</p>
+    </li>
   </ol>
 </section>
 
-<section aria-labelledby="faq-h">
-  <h2 id="faq-h">Questions</h2>
+<section id="faq" aria-labelledby="faq-h">
+  <div class="section-head">
+    <h2 id="faq-h">Questions</h2>
+  </div>
   <div class="faq">
     <details>
       <summary>When does my time start?</summary>
@@ -51,9 +96,25 @@
       <p>Yes. If you claim a second key while you still have access, its time is added to what you have left.</p>
     </details>
     <details>
+      <summary>What happens when my time is up?</summary>
+      <p>We remove the Tracker Access role and send you a DM. The role comes off either way: if your DMs from the server are closed, the message can't be delivered.</p>
+    </details>
+    <details>
       <summary>I lost my key.</summary>
       <p>Open the confirmation page again from the link Stripe sent you back to. If that's gone, ask the staff in our Discord and have the email you paid with ready.</p>
     </details>
   </div>
 </section>
+
+{% if support_url %}
+<section aria-labelledby="help-h">
+  <div class="band">
+    <div>
+      <h2 id="help-h">Need a hand?</h2>
+      <p>Ask in the Discord and have the email you paid with ready.</p>
+    </div>
+    <a class="btn btn-primary" href="{{ support_url }}" rel="noopener">Join the Discord</a>
+  </div>
+</section>
+{% endif %}
 {% endblock %}
