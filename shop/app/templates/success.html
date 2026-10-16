@@ -16,7 +16,9 @@
     <button type="button" class="solid" data-copy="{{ key }}" data-label="Copy key" data-fallback="#key">Copy key</button>
     <button type="button" class="ghost" data-copy="/claim_key {{ key }}" data-label="Copy command" data-fallback="#key">Copy command</button>
   </div>
-  {% if claimed %}
+  {% if revoked %}
+  <p class="notice">This key has been revoked and can't be redeemed. Contact staff in the Discord if you think that's a mistake.</p>
+  {% elif claimed %}
   <p class="notice">This key has already been redeemed in Discord.</p>
   {% endif %}
 </section>

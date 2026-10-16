@@ -145,7 +145,10 @@ def find_order(session_id: str):
         row = db.query(LicenseKey).filter(LicenseKey.order_ref == session_id).first()
         if row is None:
             return None
-        return {"key": row.key, "plan": row.plan, "claimed": row.claimed_by is not None}
+        # claimed_by == 0 is the bot's "revoked by an owner" marker, not a real Discord id.
+        return {"key": row.key, "plan": row.plan,
+                "claimed": row.claimed_by is not None and row.claimed_by != 0,
+                "revoked": row.claimed_by == 0}
     finally:
         db.close()
 
@@ -334,7 +337,8 @@ def success(request: Request, session_id: str = ""):
         return message(request, "Key not found", "Contact support with the email you paid with.", 500)
 
     resp = render(request, "success.html", 200, key=order["key"],
-                  plan_name=PLANS[order["plan"]]["name"], claimed=order["claimed"])
+                  plan_name=PLANS[order["plan"]]["name"], claimed=order["claimed"],
+                  revoked=order["revoked"])
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["X-Robots-Tag"] = "noindex"
     return resp

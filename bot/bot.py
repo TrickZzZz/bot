@@ -11,6 +11,7 @@ import json
 from dotenv import load_dotenv
 from sqlalchemy import (create_engine, Column, Integer, BigInteger, Boolean,
                         String, DateTime, Text, update, delete)
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker, declarative_base
 from cryptography.fernet import Fernet, InvalidToken
 
@@ -138,6 +139,23 @@ SHOP_URL        = os.environ.get("SHOP_URL", "")
 KEY_PLANS       = {"day": timedelta(days=1), "week": timedelta(days=7)}
 KEY_ALPHABET    = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I lookalikes
 
+def parse_id_list(raw: str) -> frozenset:
+    """'123, 456' -> frozenset({123, 456}). Anything that isn't a plain number is ignored."""
+    ids = set()
+    for part in raw.replace(";", ",").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.add(int(part))
+    return frozenset(ids)
+
+# Only members holding one of these roles may run /gen keylicense and /revoke.
+# If the variable is set but holds no valid ids, nobody can run them (fails closed).
+OWNER_ROLE_IDS  = parse_id_list(os.environ.get(
+    "OWNER_ROLE_IDS", "1518282859524395251,1518288403144245269"))
+OWNER_KEY_PLANS = {"1d": "day", "1w": "week"}     # /gen keylicense choice -> key plan
+PLAN_LABELS     = {"day": "1 day", "week": "1 week"}
+REVOKED_BY      = 0   # license_keys.claimed_by sentinel: revoked by an owner, never redeemable
+
 class LicenseKey(Base):
     """One row per sold key. Inserted by the shop (or /genkey), redeemed by /claim_key."""
     __tablename__ = "license_keys"
@@ -230,7 +248,7 @@ def db_create_keys(plan: str, count: int) -> list:
 
 def db_claim_key(user_id: int, guild_id: int, raw_key: str):
     """Atomically claim a key and create or extend the user's access window.
-    Returns ("ok", info) | ("invalid", None) | ("used", None)."""
+    Returns ("ok", info) | ("invalid", None) | ("used", None) | ("revoked", None)."""
     key = raw_key.strip().upper()
     now = utcnow()
     db  = SessionLocal()
@@ -238,6 +256,8 @@ def db_claim_key(user_id: int, guild_id: int, raw_key: str):
         row = db.query(LicenseKey).filter(LicenseKey.key == key).first()
         if row is None or row.plan not in KEY_PLANS:
             return "invalid", None
+        if row.claimed_by == REVOKED_BY:
+            return "revoked", None
         if row.claimed_by is not None:
             return "used", None
         key_id, plan = row.id, row.plan
@@ -332,6 +352,81 @@ def db_reactivate(access_id: int):
     try:
         db.execute(update(KeyAccess).where(KeyAccess.id == access_id).values(active=True))
         db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def db_create_owner_key(plan: str, issuer_id: int) -> str:
+    """Create one key for /gen keylicense. order_ref records which owner issued it."""
+    if plan not in KEY_PLANS:
+        raise ValueError(f"Unknown plan: {plan}")
+    for _ in range(3):
+        key = generate_key(plan)
+        db  = SessionLocal()
+        try:
+            db.add(LicenseKey(key=key, plan=plan,
+                              order_ref=f"owner:{issuer_id}:{secrets.token_hex(8)}"))
+            db.commit()
+            return key
+        except IntegrityError:
+            db.rollback()          # astronomically unlikely key collision: draw a fresh key
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+    raise RuntimeError("Could not generate a unique key")
+
+def db_revoke_key(raw_key: str):
+    """Stop an unredeemed key from ever being claimed. The row stays (claimed_by set to
+    REVOKED_BY) so the shop's idempotent fulfilment can't issue a replacement.
+    Returns ("ok", plan) | ("invalid", None) | ("revoked", None) | ("claimed", user_id)."""
+    key = raw_key.strip().upper()
+    db  = SessionLocal()
+    try:
+        row = db.query(LicenseKey).filter(LicenseKey.key == key).first()
+        if row is None:
+            return "invalid", None
+        if row.claimed_by == REVOKED_BY:
+            return "revoked", None
+        if row.claimed_by is not None:
+            return "claimed", row.claimed_by
+        row_id, plan = row.id, row.plan
+
+        # Same single-statement guard as the claim: it only wins while the key is unclaimed.
+        res = db.execute(
+            update(LicenseKey)
+            .where(LicenseKey.id == row_id, LicenseKey.claimed_by.is_(None))
+            .values(claimed_by=REVOKED_BY, claimed_at=utcnow()))
+        db.commit()
+        if res.rowcount == 1:
+            return "ok", plan
+        fresh = db.query(LicenseKey).filter(LicenseKey.id == row_id).first()   # claimed in between
+        return "claimed", (fresh.claimed_by if fresh else None)
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def db_end_user_access(user_id: int, guild_id: int) -> list:
+    """Close every live access window for a user. Returns the ids it closed so a failed
+    role removal can reopen them. (If the expiry loop closes one of these between the
+    read and the write, reopening it is harmless: the loop just closes it again.)"""
+    db = SessionLocal()
+    try:
+        ids = [r[0] for r in db.query(KeyAccess.id)
+                              .filter(KeyAccess.user_id == user_id,
+                                      KeyAccess.guild_id == guild_id,
+                                      KeyAccess.active.is_(True)).all()]
+        if ids:
+            db.execute(update(KeyAccess)
+                       .where(KeyAccess.id.in_(ids), KeyAccess.active.is_(True))
+                       .values(active=False))
+            db.commit()
+        return ids
     except Exception:
         db.rollback()
         raise
@@ -734,6 +829,10 @@ async def claim_key(interaction: discord.Interaction, key: str):
     if status == "used":
         await interaction.followup.send("That key has already been used.", ephemeral=True)
         return
+    if status == "revoked":
+        await interaction.followup.send(
+            "That key has been revoked. Contact staff if you think that's a mistake.", ephemeral=True)
+        return
 
     try:
         await interaction.user.add_roles(role, reason=f"Tracker key claimed ({info['plan']})")
@@ -778,6 +877,168 @@ async def genkey(interaction: discord.Interaction, plan: app_commands.Choice[str
     await interaction.response.send_message(
         f"**{amount} × {plan.name}** key(s):\n```\n" + "\n".join(keys) + "\n```", ephemeral=True)
 
+# ── Owner commands (roles in OWNER_ROLE_IDS only) ──────────────────────────
+def is_owner(interaction: discord.Interaction) -> bool:
+    roles = getattr(interaction.user, "roles", None) or []
+    return any(r.id in OWNER_ROLE_IDS for r in roles)
+
+async def require_owner(interaction: discord.Interaction) -> bool:
+    """Refuse, privately, unless the caller holds an owner role. True means carry on."""
+    if is_owner(interaction):
+        return True
+    name = interaction.command.qualified_name if interaction.command else "?"
+    print(f"[keys] {interaction.user} ({interaction.user.id}) tried /{name} without an owner role")
+    await interaction.response.send_message("This command is for owners only.", ephemeral=True)
+    return False
+
+async def try_dm(user, embed: discord.Embed) -> bool:
+    """DM a user. False if their DMs are closed or Discord refused."""
+    try:
+        await user.send(embed=embed)
+        return True
+    except discord.HTTPException:
+        return False
+
+
+owner_gen = app_commands.Group(name="gen", description="Owner tools", guild_only=True)
+
+@owner_gen.command(name="keylicense", description="(Owner) Create a key and DM it to a user")
+@app_commands.describe(duration="Key length", user="Who the key is for")
+@app_commands.choices(duration=[app_commands.Choice(name="1d (1 day)", value="1d"),
+                                app_commands.Choice(name="1w (1 week)", value="1w")])
+async def gen_keylicense(interaction: discord.Interaction,
+                         duration: app_commands.Choice[str], user: discord.Member):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    if user.bot:
+        await interaction.followup.send("Bots can't receive keys.", ephemeral=True)
+        return
+
+    plan  = OWNER_KEY_PLANS[duration.value]
+    label = PLAN_LABELS[plan]
+    try:
+        key = await asyncio.to_thread(db_create_owner_key, plan, interaction.user.id)
+    except Exception as e:
+        print(f"[!] /gen keylicense failed: {e}")
+        await interaction.followup.send(
+            "I couldn't create the key. Check the bot logs.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="Your Tracker Access key",
+        description=f"Staff have issued you a **{label}** key.",
+        color=0x7C3AED)
+    embed.add_field(name="Activation key", value=f"```\n{key}\n```", inline=False)
+    embed.add_field(name="How to redeem",
+                    value="Run `/claim_key` in the server and paste the key.", inline=False)
+    embed.add_field(
+        name="Timeline",
+        value=(f"Your {label} starts when you claim the key, not before, and an unclaimed "
+               f"key doesn't expire. When your time is up we remove the role and send you "
+               f"a message."),
+        inline=False)
+    delivered = await try_dm(user, embed)
+    print(f"[keys] {interaction.user.id} issued a {plan} key to {user.id} "
+          f"(DM {'sent' if delivered else 'failed'})")
+
+    status = (f"Key sent to {user.mention} by DM." if delivered else
+              f"I couldn't DM {user.mention} (their DMs are closed). Pass the key to them yourself.")
+    await interaction.followup.send(
+        f"{status}\n**{label}** key:\n```\n{key}\n```It stays unclaimed until they run `/claim_key`.",
+        ephemeral=True)
+
+
+owner_revoke = app_commands.Group(name="revoke", description="Owner tools", guild_only=True)
+
+@owner_revoke.command(name="key", description="(Owner) Stop an unredeemed key from being used")
+@app_commands.describe(key="The key to revoke, e.g. TRK-D-ABCD-EFGH-JKLM")
+async def revoke_key_cmd(interaction: discord.Interaction, key: str):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    try:
+        status, detail = await asyncio.to_thread(db_revoke_key, key)
+    except Exception as e:
+        print(f"[!] /revoke key failed: {e}")
+        await interaction.followup.send(
+            "I couldn't check that key. Check the bot logs.", ephemeral=True)
+        return
+
+    if status == "invalid":
+        msg = "No key matches that text. Check it and try again."
+    elif status == "revoked":
+        msg = "That key has already been revoked."
+    elif status == "claimed":
+        who = f"<@{detail}>" if detail else "someone"
+        msg = f"That key was already redeemed by {who}. Use `/revoke user` to end their access."
+    else:
+        msg = f"Revoked the **{PLAN_LABELS.get(detail, detail)}** key. It can no longer be redeemed."
+    print(f"[keys] {interaction.user.id} ran /revoke key -> {status}")
+    await interaction.followup.send(msg, ephemeral=True)
+
+
+@owner_revoke.command(name="user", description="(Owner) End a user's Tracker Access now")
+@app_commands.describe(user="Whose access to end")
+async def revoke_user_cmd(interaction: discord.Interaction, user: discord.Member):
+    if not await require_owner(interaction):
+        return
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    role  = guild.get_role(TRACKER_ROLE_ID)
+    if role is None:
+        print(f"[!] Tracker role {TRACKER_ROLE_ID} not found in guild")
+        await interaction.followup.send(
+            "The Tracker Access role could not be found.", ephemeral=True)
+        return
+
+    try:
+        ended = await asyncio.to_thread(db_end_user_access, user.id, guild.id)
+    except Exception as e:
+        print(f"[!] /revoke user DB error: {e}")
+        await interaction.followup.send(
+            "I couldn't update the database, so nothing was changed.", ephemeral=True)
+        return
+
+    had_role = role in user.roles
+    if had_role:
+        try:
+            await user.remove_roles(role, reason=f"Tracker access revoked by {interaction.user}")
+        except discord.HTTPException as e:  # includes Forbidden
+            print(f"[!] Could not remove role from {user.id}: {e}")
+            for access_id in ended:         # put the windows back: nothing changed
+                try:
+                    await asyncio.to_thread(db_reactivate, access_id)
+                except Exception as undo_err:
+                    print(f"[!] CRITICAL: could not reopen access {access_id}: {undo_err}")
+            await interaction.followup.send(
+                "I couldn't remove the role, so nothing was changed. Check that I have "
+                "Manage Roles and that my role sits above Tracker Access.", ephemeral=True)
+            return
+
+    if not ended and not had_role:
+        await interaction.followup.send(
+            f"{user.mention} has no Tracker Access to revoke.", ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="Your access has ended",
+        description=("Staff have ended your **Tracker Access** and removed the role. "
+                     "If you think that's a mistake, contact staff."),
+        color=0xEF4444)
+    delivered = await try_dm(user, embed)
+    print(f"[keys] {interaction.user.id} revoked {user.id}: role={'removed' if had_role else 'absent'}, "
+          f"windows={len(ended)}, DM {'sent' if delivered else 'failed'}")
+    await interaction.followup.send(
+        f"Revoked {user.mention}.\n"
+        f"Role removed: {'yes' if had_role else 'they did not have it'}\n"
+        f"Key windows ended: {len(ended)}\n"
+        f"DM: {'sent' if delivered else 'not delivered (their DMs are closed)'}",
+        ephemeral=True)
+
+
 client.tree.add_command(claim_key)
 client.tree.add_command(genkey)
+client.tree.add_command(owner_gen)
+client.tree.add_command(owner_revoke)
 client.run(TOKEN)
