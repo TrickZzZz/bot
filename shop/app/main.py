@@ -56,17 +56,19 @@ STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
 SITE_URL              = _env("SITE_URL").rstrip("/")
 SUPPORT_URL           = _env("SUPPORT_URL")
 
-# Prices are in pence. Must match the plan names the bot understands ("day", "week").
+# Prices are in US cents (Stripe's minimum charge is 50 cents). Must match the
+# plan names the bot understands ("day", "week").
+CURRENCY = "usd"
 PLANS = {
-    "day":  {"name": "1 day",  "label": "1-day key", "pence": 50,  "days": 1},
-    "week": {"name": "7 days", "label": "7-day key", "pence": 200, "days": 7},
+    "day":  {"name": "1 day",  "label": "1-day key", "cents": 50,  "days": 1},
+    "week": {"name": "7 days", "label": "7-day key", "cents": 200, "days": 7},
 }
 KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I lookalikes
 SESSION_ID_RE = re.compile(r"^cs_(test|live)_[A-Za-z0-9]{10,200}$")
 
 
-def price_text(pence: int) -> str:
-    return f"£{pence / 100:.2f}" if pence >= 100 else f"{pence}p"
+def price_text(cents: int) -> str:
+    return f"${cents / 100:.2f}"
 
 
 # ── Database (table definition mirrors bot/bot.py) ─────────────────────────
@@ -216,8 +218,8 @@ def message(request: Request, title: str, body: str, status: int = 200, refresh:
 def index(request: Request):
     plans = [{
         "id": pid, "name": p["name"], "label": p["label"], "days": p["days"],
-        "price": price_text(p["pence"]),
-        "per_day": f"{round(p['pence'] / p['days'])}p",
+        "price": price_text(p["cents"]),
+        "per_day": price_text(round(p["cents"] / p["days"])),
     } for pid, p in PLANS.items()]
     return render(request, "index.html", plans=plans, checkout_ready=bool(STRIPE_SECRET_KEY))
 
@@ -243,8 +245,8 @@ def buy(request: Request, plan_id: str):
             line_items=[{
                 "quantity": 1,
                 "price_data": {
-                    "currency": "gbp",
-                    "unit_amount": plan["pence"],
+                    "currency": CURRENCY,
+                    "unit_amount": plan["cents"],
                     "product_data": {
                         "name": f"Tracker Access: {plan['name']}",
                         "description": "Redeem in Discord with /claim_key",
