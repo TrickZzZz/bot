@@ -183,6 +183,21 @@ class KeyAccess(Base):
 
 Base.metadata.create_all(bind=engine)
 
+# Columns the shop adds to license_keys when Stripe reports a payment dispute. Added here too,
+# so the bot never queries a column that doesn't exist yet if it starts before the shop does.
+SHOP_DISPUTE_COLUMNS = ("dispute_at", "dispute_handled_at")
+
+def ensure_dispute_columns():
+    for name in SHOP_DISPUTE_COLUMNS:
+        try:
+            with engine.begin() as conn:
+                conn.execute(sql_text(
+                    f"ALTER TABLE license_keys ADD COLUMN IF NOT EXISTS {name} TIMESTAMPTZ"))
+        except Exception as e:
+            print(f"[keys] could not add license_keys.{name}: {e}")
+
+ensure_dispute_columns()
+
 def count_alts():
     db = SessionLocal()
     try:    return db.query(Account).count()
@@ -495,6 +510,38 @@ def db_user_key_info(user_id: int, guild_id: int, show: int = 8) -> dict:
     return {"live_ends": live, "last_end": max(ended) if ended else None,
             "keys": keys[:show], "key_total": len(keys), "plans": plans}
 
+def db_pending_disputes(limit: int = 20) -> list:
+    """Redeemed keys whose payment was disputed and that the bot hasn't dealt with yet, as
+    [(key_id, discord_user_id)]. The shop sets dispute_at when Stripe reports the dispute.
+    A key nobody had redeemed is blocked by the shop itself (claimed_by = REVOKED_BY)."""
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            sql_text("SELECT id, claimed_by FROM license_keys "
+                     "WHERE dispute_at IS NOT NULL AND dispute_handled_at IS NULL "
+                     "AND claimed_by IS NOT NULL AND claimed_by <> :revoked "
+                     "ORDER BY dispute_at ASC LIMIT :limit"),
+            {"revoked": REVOKED_BY, "limit": limit}).all()
+        return [(r[0], r[1]) for r in rows]
+    finally:
+        db.close()
+
+def db_mark_dispute_handled(key_id: int) -> bool:
+    """True only for the call that recorded it, so a repeat pass changes nothing."""
+    db = SessionLocal()
+    try:
+        res = db.execute(
+            sql_text("UPDATE license_keys SET dispute_handled_at = :now "
+                     "WHERE id = :id AND dispute_handled_at IS NULL"),
+            {"now": utcnow(), "id": key_id})
+        db.commit()
+        return res.rowcount == 1
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
 
 # ── Core generate logic ────────────────────────────────────────────────────
 async def do_generate(interaction: discord.Interaction, account_type: str, region: str = None):
@@ -714,6 +761,8 @@ class CredBot(discord.Client):
             self.refresh_stock.start()
         if not self.expire_access.is_running():
             self.expire_access.start()
+        if not self.process_disputes.is_running():
+            self.process_disputes.start()
 
     async def update_stock_channel(self, total: int = None):
         if not VOICE_CHANNEL_ID:
@@ -831,6 +880,51 @@ class CredBot(discord.Client):
                 title="Your key is over", description=text, color=0x7C3AED))
         except discord.HTTPException:
             print(f"[keys] Could not DM {user_id} (DMs closed)")
+
+    # ── Payment disputes ──────────────────────────────────────────────────
+    @tasks.loop(seconds=60)
+    async def process_disputes(self):
+        """When Stripe reports a chargeback on a key somebody already redeemed, the shop marks
+        the key and this loop ends that person's access and takes the role off them."""
+        try:
+            pending = await asyncio.to_thread(db_pending_disputes)
+        except Exception as e:
+            print(f"[!] Dispute scan failed: {e}")
+            return
+        for key_id, user_id in pending:
+            try:
+                await self.end_disputed_access(key_id, user_id)
+            except Exception as e:
+                print(f"[!] Dispute handling failed for key {key_id}: {e}")
+
+    @process_disputes.before_loop
+    async def before_disputes(self):
+        await self.wait_until_ready()
+
+    async def end_disputed_access(self, key_id: int, user_id: int) -> bool:
+        """End the access of whoever redeemed a disputed key. True once it is dealt with (access
+        ended, or there was nothing to end); False when something failed, so the next pass retries."""
+        guilds = [g for g in self.guilds if g.get_role(TRACKER_ROLE_ID) is not None]
+        if not guilds:
+            print(f"[!] Dispute on key {key_id}: the Tracker role isn't in any server I'm in")
+            return False
+        for guild in guilds:
+            role = guild.get_role(TRACKER_ROLE_ID)
+            try:
+                member = await guild.fetch_member(user_id)
+            except discord.NotFound:
+                member = None                   # they left the server: no role left to remove
+            except discord.HTTPException as e:
+                print(f"[!] Dispute on key {key_id}: could not look up {user_id}: {e} — will retry")
+                return False
+            outcome, _detail = await revoke_member_access(
+                guild, role, user_id, member, DISPUTE_ACTOR, dm_embed=dispute_dm_embed())
+            if outcome in ("db_error", "role_error"):
+                print(f"[!] Dispute on key {key_id}: {outcome} for {user_id} — will retry")
+                return False
+        await asyncio.to_thread(db_mark_dispute_handled, key_id)
+        print(f"[keys] Payment dispute on key {key_id}: access ended for {user_id}")
+        return True
 
 
 client = CredBot()
@@ -1019,9 +1113,26 @@ REVOKE_ERRORS = {
                   "Manage Roles and that my role sits above Tracker Access.",
 }
 
-async def revoke_member_access(guild, role, user_id: int, member, actor):
+class _DisputeActor:
+    """Stands in for the staff member in revoke_member_access when the shop reports a chargeback."""
+    id = 0
+    def __str__(self):
+        return "a payment dispute"
+
+DISPUTE_ACTOR = _DisputeActor()
+
+def dispute_dm_embed():
+    return discord.Embed(
+        title="Your access has ended",
+        description=("The payment for one of your **Tracker Access** keys was disputed with the "
+                     "card issuer, so your access has ended and the role was removed. "
+                     "If you think that's a mistake, open a support ticket."),
+        color=0xEF4444)
+
+async def revoke_member_access(guild, role, user_id: int, member, actor, dm_embed=None):
     """End every live Tracker access window for user_id and take the Tracker role off them.
-    member is None when they are no longer in the server. Returns (outcome, detail):
+    member is None when they are no longer in the server. dm_embed replaces the usual
+    "staff ended your access" message. Returns (outcome, detail):
       ("db_error", None)    nothing was changed
       ("role_error", None)  Discord refused the role removal; windows were put back, nothing changed
       ("nothing", None)     they had no access window and no role
@@ -1050,7 +1161,7 @@ async def revoke_member_access(guild, role, user_id: int, member, actor):
 
     delivered = False
     if member is not None:
-        embed = discord.Embed(
+        embed = dm_embed or discord.Embed(
             title="Your access has ended",
             description=("Staff have ended your **Tracker Access** and removed the role. "
                          "If you think that's a mistake, contact staff."),
@@ -1298,7 +1409,8 @@ def db_find_order(raw: str):
             return None
         info = {"id": row.id, "key": row.key, "plan": row.plan, "order_ref": row.order_ref,
                 "created_at": aware(row.created_at), "claimed_by": row.claimed_by,
-                "claimed_at": aware(row.claimed_at), "buyer_email": row.buyer_email, "pay": None}
+                "claimed_at": aware(row.claimed_at), "buyer_email": row.buyer_email, "pay": None,
+                "dispute_at": None, "dispute_handled_at": None}
         try:   # the shop adds these columns, so they can be missing until it has started once
             r = db.execute(
                 sql_text("SELECT pay_currency, pay_subtotal, pay_tax, pay_discount, pay_total "
@@ -1309,6 +1421,15 @@ def db_find_order(raw: str):
         except Exception as e:
             db.rollback()
             print(f"[keys] payment columns not readable yet: {e}")
+        try:   # same for the dispute columns
+            r = db.execute(
+                sql_text("SELECT dispute_at, dispute_handled_at FROM license_keys WHERE id = :id"),
+                {"id": info["id"]}).first()
+            if r is not None:
+                info["dispute_at"], info["dispute_handled_at"] = aware(r[0]), aware(r[1])
+        except Exception as e:
+            db.rollback()
+            print(f"[keys] dispute columns not readable yet: {e}")
         return info
     finally:
         db.close()
@@ -1360,6 +1481,11 @@ async def order_lookup(interaction: discord.Interaction, order_id: str):
                   + (f" on {discord_time(info['claimed_at'])}" if info["claimed_at"] else ""))
     else:
         status = "Not redeemed yet"
+    if info.get("dispute_at"):
+        status += f"\n⚠️ Payment disputed {discord_time(info['dispute_at'])}."
+        if info["claimed_by"] not in (None, REVOKED_BY):
+            status += (" Their access has been ended." if info.get("dispute_handled_at")
+                       else " The bot is ending their access.")
 
     pay = info["pay"]
     if pay:
