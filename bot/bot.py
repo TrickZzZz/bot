@@ -930,32 +930,6 @@ class CredBot(discord.Client):
 client = CredBot()
 
 
-# ── Slash commands ─────────────────────────────────────────────────────────
-generate_group = app_commands.Group(name="generate", description="Generate an account")
-
-@generate_group.command(name="30d", description="+30 days old account")
-@app_commands.describe(region="Region code e.g. GB, DE, US (leave blank for any)")
-async def gen_30d(interaction: discord.Interaction, region: str = None):
-    await do_generate(interaction, "+30 days old", region)
-
-@generate_group.command(name="1y", description="+1 year old account")
-@app_commands.describe(region="Region code e.g. GB, DE, US (leave blank for any)")
-async def gen_1y(interaction: discord.Interaction, region: str = None):
-    await do_generate(interaction, "+1 year old", region)
-
-@generate_group.command(name="5y", description="5+ years old account")
-@app_commands.describe(region="Region code e.g. GB, DE, US (leave blank for any)")
-async def gen_5y(interaction: discord.Interaction, region: str = None):
-    await do_generate(interaction, "5+ years old", region)
-
-@generate_group.command(name="dump", description="Dump account")
-@app_commands.describe(region="Region code e.g. GB, DE, US (leave blank for any)")
-async def gen_dump(interaction: discord.Interaction, region: str = None):
-    await do_generate(interaction, "dump", region)
-
-client.tree.add_command(generate_group)
-
-
 # ── Tracker key commands ───────────────────────────────────────────────────
 @app_commands.command(name="claim_key", description="Redeem a Tracker Access key")
 @app_commands.describe(key="Your key, e.g. TRK-D-ABCD-EFGH-JKLM")
