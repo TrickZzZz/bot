@@ -363,10 +363,10 @@ export default function DashboardPage({ onLogout }) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Bulk import</DialogTitle>
-            <DialogDescription>CSV (username,password,account_type,region), JSON array, or username:password:cookie / username|password|cookie (one per line).</DialogDescription>
+            <DialogDescription>CSV (username,password,account_type,region), JSON array, username:password:cookie / username|password|cookie, or just a raw cookie per line (username/password auto-generated).</DialogDescription>
           </DialogHeader>
           <textarea value={importText} onChange={e => setImportText(e.target.value)} rows={10}
-            placeholder={'username,password,account_type,region\ncooluser123,DeltaCore,+30 days old,GB\n\nor:\ncooluser123:DeltaCore:_|WARNING:-DO-NOT-SHARE-THIS...|_abc123'}
+            placeholder={'username,password,account_type,region\ncooluser123,DeltaCore,+30 days old,GB\n\nor:\ncooluser123:DeltaCore:_|WARNING:-DO-NOT-SHARE-THIS...|_abc123\n\nor just:\n_|WARNING:-DO-NOT-SHARE-THIS...|_abc123'}
             className="w-full rounded-md border border-input bg-secondary/50 px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y" />
           <label className="flex items-center gap-2 text-sm text-muted-foreground mt-2">
             <input type="checkbox" checked={importAs30d} onChange={e => setImportAs30d(e.target.checked)}
@@ -404,6 +404,20 @@ function parseImport(text, forceType) {
 
   const lines = trimmed.split(/\r?\n/).filter(l => l.trim())
   if (lines.length === 0) return []
+
+  // Cookie-only, one raw .ROBLOSECURITY cookie per line, nothing else. Detected by every
+  // line starting directly with the cookie's fixed "_|WARNING" marker (no username/password
+  // prefix in front of it). The account record requires a username and password, so both are
+  // auto-generated here since the pasted data doesn't supply them.
+  if (lines.every(l => l.trim().startsWith("_|WARNING"))) {
+    return lines.map((line, i) => applyForce({
+      username:     `cookie_import_${i + 1}`,
+      password:     genPlaceholderPassword(),
+      account_type: "+30 days old",
+      cookie:       line.trim(),
+      region:       "",
+    }))
+  }
 
   // username|password|cookie or username:password:cookie, one per line, no header row.
   // The cookie itself can contain both ":" and "|" (Roblox's .ROBLOSECURITY always starts
@@ -454,6 +468,12 @@ function parseImport(text, forceType) {
       region: cells[idx("region")]?.trim() || "",
     })]
   })
+}
+
+function genPlaceholderPassword() {
+  const bytes = new Uint8Array(16)
+  crypto.getRandomValues(bytes)
+  return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("")
 }
 
 function splitCsvLine(line) {
