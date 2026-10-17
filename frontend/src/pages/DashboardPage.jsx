@@ -408,14 +408,16 @@ function parseImport(text, forceType) {
   // username|password|cookie, one per line, no header row
   if (lines.every(l => l.includes("|"))) {
     return lines.flatMap(line => {
-      const parts = line.split("|")
-      const username = parts[0]?.trim()
-      const password = parts[1]?.trim()
+      const firstPipe = line.indexOf("|")
+      const secondPipe = line.indexOf("|", firstPipe + 1)
+      const username = (secondPipe === -1 ? line : line.slice(0, firstPipe)).trim()
+      const password = secondPipe === -1 ? "" : line.slice(firstPipe + 1, secondPipe).trim()
+      const cookie = secondPipe === -1 ? "" : line.slice(secondPipe + 1).trim()
       if (!username || !password) return []
       return [applyForce({
         username, password,
         account_type: "+30 days old",
-        cookie: parts[2]?.trim() || "",
+        cookie,
         region: "",
       })]
     })
