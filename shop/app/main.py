@@ -9,9 +9,18 @@ Environment:
   STRIPE_WEBHOOK_SECRET  whsec_... for POST /stripe/webhook
   SITE_URL               public base URL, e.g. https://keys.example.com (optional)
   SUPPORT_URL            Discord invite shown on the site (optional)
+  MAIL_API_KEY           API key of the email service that sends each buyer their key (optional)
+  MAIL_FROM              sender, e.g. "Tracker Access <keys@yourdomain.com>" (needed with MAIL_API_KEY)
+  MAIL_PROVIDER          "resend" (default) or "brevo"
+  MAIL_REPLY_TO          where replies go (optional)
   LOG_LEVEL              default INFO
+
+Key emails stay off until MAIL_API_KEY and MAIL_FROM are both set.
+For Stripe, send the checkout.session.completed and charge.dispute.created events to
+/stripe/webhook. A disputed payment revokes its key; the Discord bot then removes the role.
 """
 import hashlib
+import html
 import json
 import logging
 import os
@@ -19,14 +28,17 @@ import re
 import secrets
 import sys
 import time
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parseaddr
 from functools import cache
 from pathlib import Path
 from urllib.parse import parse_qs
 
 import stripe
-from fastapi import FastAPI, Request
+from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -64,6 +76,12 @@ STRIPE_SECRET_KEY     = _env("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
 SITE_URL              = _env("SITE_URL").rstrip("/")
 SUPPORT_URL           = _env("SUPPORT_URL")
+
+# Emailing each buyer their key. Off until a key and a sender are both set (see mail_enabled).
+MAIL_API_KEY  = _env("MAIL_API_KEY")
+MAIL_FROM     = _env("MAIL_FROM")
+MAIL_REPLY_TO = _env("MAIL_REPLY_TO")
+MAIL_PROVIDER = _env("MAIL_PROVIDER", "resend").lower()
 
 # Prices are in pence (Stripe's minimum GBP charge is 30p). Must match the
 # plan names the bot understands ("day", "week", "month"), and "days" must match
@@ -111,6 +129,14 @@ class LicenseKey(Base):
     pay_tax      = Column(Integer, nullable=True)
     pay_discount = Column(Integer, nullable=True)
     pay_total    = Column(Integer, nullable=True)
+    # Which Stripe payment bought the key, so a dispute on that payment can find it.
+    payment_intent = Column(String(255), nullable=True)
+    # Key email: when it went out, and when the last send was started (see claim_email_send).
+    email_sent_at    = Column(DateTime(timezone=True), nullable=True)
+    email_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    # Payment dispute: when Stripe told us, and when the bot finished ending the access.
+    dispute_at         = Column(DateTime(timezone=True), nullable=True)
+    dispute_handled_at = Column(DateTime(timezone=True), nullable=True)
 
 
 # Columns the shop owns on license_keys (the bot's own copy of the table doesn't map them).
@@ -121,6 +147,11 @@ SHOP_COLUMNS = {
     "pay_tax":      "INTEGER",
     "pay_discount": "INTEGER",
     "pay_total":    "INTEGER",
+    "payment_intent":     "VARCHAR(255)",
+    "email_sent_at":      "TIMESTAMPTZ",
+    "email_attempt_at":   "TIMESTAMPTZ",
+    "dispute_at":         "TIMESTAMPTZ",
+    "dispute_handled_at": "TIMESTAMPTZ",
 }
 
 
@@ -243,11 +274,14 @@ def find_order(session_id: str):
         row = db.query(LicenseKey).filter(LicenseKey.order_ref == session_id).first()
         if row is None:
             return None
-        # claimed_by == 0 is the bot's "revoked by an owner" marker, not a real Discord id.
+        # claimed_by == 0 is the bot's "revoked" marker (an owner, or a payment dispute), not a real Discord id.
+        emailed = row.email_sent_at is not None and bool(row.buyer_email)
         return {"key": row.key, "plan": row.plan,
                 "claimed": row.claimed_by is not None and row.claimed_by != 0,
                 "revoked": row.claimed_by == 0,
-                "paid_at": when_text(row.created_at), "details": order_details(row)}
+                "paid_at": when_text(row.created_at), "details": order_details(row),
+                "emailed": emailed, "email_hint": mask_email(row.buyer_email) if emailed else "",
+                "mailable": bool(row.buyer_email) and row.claimed_by != 0}
     finally:
         db.close()
 
@@ -278,6 +312,13 @@ async def lifespan(_app: FastAPI):
         log.warning("STRIPE_SECRET_KEY is not set — checkout is disabled")
     if not STRIPE_WEBHOOK_SECRET:
         log.warning("STRIPE_WEBHOOK_SECRET is not set — webhook is disabled")
+    mail_problem = mail_config_problem()
+    if mail_enabled():
+        log.info("Key emails are on (%s)", MAIL_PROVIDER)
+    elif mail_problem:
+        log.warning("Key emails are off: %s", mail_problem)
+    else:
+        log.info("Key emails are off (set MAIL_API_KEY and MAIL_FROM to turn them on)")
     yield
 
 
@@ -372,7 +413,7 @@ def index(request: Request):
     } for pid, p in PLANS.items()]
     default_plan = DEFAULT_PLAN if DEFAULT_PLAN in PLANS else next(iter(PLANS))
     return render(request, "index.html", plans=plans, default_plan=default_plan,
-                  checkout_ready=bool(STRIPE_SECRET_KEY))
+                  checkout_ready=bool(STRIPE_SECRET_KEY), email_on=mail_enabled())
 
 
 @app.get("/terms")
@@ -444,7 +485,7 @@ async def start_checkout(request: Request, plan_id: str, form: dict | None = Non
 
 
 @app.post("/stripe/webhook")
-async def stripe_webhook(request: Request):
+async def stripe_webhook(request: Request, background: BackgroundTasks):
     if not STRIPE_WEBHOOK_SECRET:
         log.error("Webhook hit but STRIPE_WEBHOOK_SECRET is not set")
         return JSONResponse({"error": "webhook not configured"}, status_code=503)
@@ -470,6 +511,18 @@ async def stripe_webhook(request: Request):
             return JSONResponse({"error": "fulfilment failed"}, status_code=500)  # Stripe retries
         log.info("Webhook %s for %s: %s", event.get("type"), order.get("id"),
                  "key ready" if key else "no key (unpaid or invalid)")
+        if key:
+            # Neither of these can fail the webhook: the key already exists, and both log their own errors.
+            await run_in_threadpool(save_payment_intent, order.get("id"), order.get("payment_intent"))
+            background.add_task(send_key_email, order.get("id"), site_base(request))
+    elif event.get("type") == "charge.dispute.created":
+        dispute = event["data"]["object"]
+        try:
+            outcome = await run_in_threadpool(handle_dispute, dispute)
+        except Exception:
+            log.exception("Handling dispute %s failed", dispute.get("id"))
+            return JSONResponse({"error": "dispute handling failed"}, status_code=500)  # Stripe retries
+        log.info("Webhook charge.dispute.created for %s: %s", dispute.get("id"), outcome)
     return {"received": True}
 
 
@@ -485,7 +538,7 @@ def plain(obj):
 
 
 @app.get("/success")
-def success(request: Request, session_id: str = ""):
+def success(request: Request, background: BackgroundTasks, session_id: str = ""):
     if not SESSION_ID_RE.match(session_id):
         return message(request, "Order not found",
                        "That confirmation link isn't valid. Use the link Stripe sent you back to.", 400)
@@ -514,8 +567,12 @@ def success(request: Request, session_id: str = ""):
             "amount_total": raw.get("amount_total"),
             "currency": raw.get("currency"),
             "total_details": raw.get("total_details") or {},
+            "payment_intent": raw.get("payment_intent"),
         }
-        if fulfil(data) is None:
+        issued = fulfil(data)
+        if issued is not None:
+            save_payment_intent(session_id, data["payment_intent"])
+        if issued is None:
             if data["payment_status"] == "paid":
                 return message(request, "Key not created",
                                "Your payment went through but the key wasn't created. "
@@ -531,9 +588,15 @@ def success(request: Request, session_id: str = ""):
                        "Open a support ticket in the Discord with the email you paid "
                        f"with and this order ID: {session_id}", 500)
 
+    # The webhook normally sends the email. Opening this page sends it too if that hasn't
+    # happened yet (a lost webhook, or a send that failed); an atomic claim stops a double send.
+    if mail_enabled() and order["mailable"] and not order["emailed"]:
+        background.add_task(send_key_email, session_id, site_base(request))
+
     resp = render(request, "success.html", 200, key=order["key"], order_id=session_id,
                   plan_name=PLANS[order["plan"]]["name"], claimed=order["claimed"],
-                  revoked=order["revoked"], details=order["details"], paid_at=order["paid_at"])
+                  revoked=order["revoked"], details=order["details"], paid_at=order["paid_at"],
+                  emailed=order["emailed"], email_hint=order["email_hint"])
     resp.headers["Cache-Control"] = "no-store"
     resp.headers["X-Robots-Tag"] = "noindex"
     return resp
@@ -542,7 +605,8 @@ def success(request: Request, session_id: str = ""):
 @app.get("/health")
 @app.head("/health")
 def health():
-    return {"ok": True, "checkout": bool(STRIPE_SECRET_KEY), "webhook": bool(STRIPE_WEBHOOK_SECRET)}
+    return {"ok": True, "checkout": bool(STRIPE_SECRET_KEY), "webhook": bool(STRIPE_WEBHOOK_SECRET),
+            "email": mail_enabled()}
 
 
 @app.get("/robots.txt")
@@ -576,3 +640,263 @@ async def http_error(request: Request, exc: StarletteHTTPException):
             resp.headers[name] = value
         return resp
     return await http_exception_handler(request, exc)
+
+
+# ── Payment disputes ───────────────────────────────────────────────────────
+# A customer who disputes a payment with their bank loses the key it bought. The shop marks
+# the key (dispute_at); the Discord bot then removes the role from whoever redeemed it.
+# The SQL sits in constants so the tests can run these exact statements on a scratch database.
+SAVE_PAYMENT_INTENT_SQL = ("UPDATE license_keys SET payment_intent = :pi "
+                           "WHERE order_ref = :sid AND payment_intent IS NULL")
+KEY_BY_PAYMENT_SQL      = "SELECT id FROM license_keys WHERE payment_intent = :pi ORDER BY id LIMIT 1"
+KEY_BY_ORDER_SQL        = "SELECT id FROM license_keys WHERE order_ref = :sid"
+BACKFILL_PAYMENT_SQL    = ("UPDATE license_keys SET payment_intent = :pi "
+                           "WHERE id = :id AND payment_intent IS NULL")
+# One statement, so a /claim_key racing a dispute can't slip through: an unclaimed key is
+# marked revoked (claimed_by 0, the same marker /revoke uses) and a claimed one is left for the
+# bot to end. Only the first dispute on a key is recorded.
+RECORD_DISPUTE_SQL = ("UPDATE license_keys SET dispute_at = :now, "
+                      "claimed_by = CASE WHEN claimed_by IS NULL THEN 0 ELSE claimed_by END, "
+                      "claimed_at = CASE WHEN claimed_by IS NULL THEN :now ELSE claimed_at END "
+                      "WHERE id = :id AND dispute_at IS NULL")
+
+
+def save_payment_intent(sid, payment_intent) -> None:
+    """Remember which Stripe payment bought a key, so a dispute on that payment can find it.
+    The key already exists when this runs, so a failure is logged and nothing more."""
+    if not sid or not isinstance(payment_intent, str) or not payment_intent.startswith("pi_"):
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(SAVE_PAYMENT_INTENT_SQL), {"pi": payment_intent[:255], "sid": sid})
+    except Exception:
+        log.exception("Could not save the payment reference for %s", sid)
+
+
+def key_id_for_payment(payment_intent: str):
+    """The row id of the key a payment bought, or None. Keys sold before payment references
+    were saved are found through Stripe, and get their reference saved on the way."""
+    with engine.begin() as conn:
+        row = conn.execute(text(KEY_BY_PAYMENT_SQL), {"pi": payment_intent}).first()
+    if row is not None:
+        return row[0]
+    if not STRIPE_SECRET_KEY:
+        return None
+    found    = plain(stripe.checkout.Session.list(payment_intent=payment_intent, limit=1,
+                                                  api_key=STRIPE_SECRET_KEY))
+    sessions = found.get("data") or []
+    sid      = sessions[0].get("id") if sessions else None
+    if not sid:
+        return None
+    with engine.begin() as conn:
+        row = conn.execute(text(KEY_BY_ORDER_SQL), {"sid": sid}).first()
+        if row is None:
+            return None
+        conn.execute(text(BACKFILL_PAYMENT_SQL), {"pi": payment_intent, "id": row[0]})
+    return row[0]
+
+
+def handle_dispute(dispute: dict) -> str:
+    """Revoke the key a disputed payment bought. Returns "recorded", "duplicate" (Stripe sent
+    the event again) or "unmatched" (not a payment for one of our keys). Raises if the database
+    or Stripe can't be reached, so the webhook answers 500 and Stripe sends the event again."""
+    did = dispute.get("id")
+    pi  = dispute.get("payment_intent")
+    if not isinstance(pi, str) or not pi:
+        log.warning("Dispute %s names no payment, so no key can be matched to it", did)
+        return "unmatched"
+    key_id = key_id_for_payment(pi)
+    if key_id is None:
+        log.warning("Dispute %s on payment %s matches no key sold here", did, pi)
+        return "unmatched"
+    with engine.begin() as conn:
+        recorded = conn.execute(text(RECORD_DISPUTE_SQL),
+                                {"now": utcnow(), "id": key_id}).rowcount == 1
+    if not recorded:
+        return "duplicate"
+    log.warning("Dispute %s recorded: key row %s is revoked and its access will end", did, key_id)
+    return "recorded"
+
+
+# ── Emailing the key ───────────────────────────────────────────────────────
+# Sent through an email service's web API (Railway blocks the usual SMTP ports on smaller plans).
+# Off until MAIL_API_KEY and MAIL_FROM are both set.
+MAIL_PROVIDERS   = ("resend", "brevo")
+MAIL_ENDPOINTS   = {"resend": "https://api.resend.com/emails",
+                    "brevo":  "https://api.brevo.com/v3/smtp/email"}
+MAIL_USER_AGENT  = "TrackerAccessShop/1.0"   # Resend is behind Cloudflare, which blocks Python's default agent
+MAIL_TIMEOUT     = 15                        # seconds
+MAIL_RETRY_AFTER = timedelta(minutes=2)      # a started send blocks another for this long
+# Claiming the send is one statement, so the webhook and the success page can't both send it.
+CLAIM_EMAIL_SQL = ("UPDATE license_keys SET email_attempt_at = :now "
+                   "WHERE order_ref = :sid AND email_sent_at IS NULL "
+                   "AND buyer_email IS NOT NULL AND buyer_email <> '' "
+                   "AND (claimed_by IS NULL OR claimed_by <> 0) "
+                   "AND (email_attempt_at IS NULL OR email_attempt_at < :cutoff)")
+EMAIL_ORDER_SQL = 'SELECT "key", plan, buyer_email FROM license_keys WHERE order_ref = :sid'
+MARK_EMAIL_SENT_SQL = ("UPDATE license_keys SET email_sent_at = :now "
+                       "WHERE order_ref = :sid AND email_sent_at IS NULL")
+
+
+class MailError(Exception):
+    """The email service didn't take the message. The text is safe to log."""
+
+
+def mail_config_problem() -> str:
+    """Why emailing can't be on, in words for the log. Empty when it is on or was never asked for."""
+    if not (MAIL_API_KEY or MAIL_FROM):
+        return ""
+    if MAIL_PROVIDER not in MAIL_PROVIDERS:
+        return f'MAIL_PROVIDER "{MAIL_PROVIDER}" is not one of: {", ".join(MAIL_PROVIDERS)}'
+    if not MAIL_API_KEY:
+        return "MAIL_API_KEY is not set"
+    if not MAIL_FROM:
+        return "MAIL_FROM is not set"
+    if "@" not in parseaddr(MAIL_FROM)[1]:
+        return "MAIL_FROM must look like keys@yourdomain.com or Tracker Access <keys@yourdomain.com>"
+    return ""
+
+
+def mail_enabled() -> bool:
+    return bool(MAIL_API_KEY and MAIL_FROM) and not mail_config_problem()
+
+
+def mask_email(address) -> str:
+    """'jane.doe@gmail.com' -> 'j***@gmail.com', so a page can say where a copy went."""
+    if not isinstance(address, str):
+        return ""
+    local, at, domain = address.rpartition("@")
+    return f"{local[0]}***@{domain}" if local and at and domain else ""
+
+
+def build_key_email(key: str, plan_name: str, order_id: str, base: str, support_url: str):
+    """(subject, plain text, html) for the email that carries a buyer's key."""
+    confirm_url = f"{base}/success?session_id={order_id}"
+    discord     = support_url if support_url.startswith(("https://", "http://")) else ""
+    subject     = "Your Tracker Access key"
+
+    open_discord = f"Open our Discord ({discord})." if discord else "Open our Discord."
+    text_body = "\n".join([
+        f"Thanks for your purchase. Here is your {plan_name} Tracker Access key:",
+        "",
+        key,
+        "",
+        "How to use it:",
+        f"1. {open_discord}",
+        "2. Run /claim_key and paste the key.",
+        "Your time starts when you run the command, not when you paid.",
+        "",
+        f"Order ID: {order_id}",
+        f"Your confirmation page, with the key and your order details: {confirm_url}",
+        "",
+        "If anything goes wrong, open a support ticket in the Discord and quote the order ID.",
+        "All sales are final, including lost keys, so keep this email.",
+    ])
+
+    e = lambda value: html.escape(str(value), quote=True)  # noqa: E731
+    discord_html = f'<a href="{e(discord)}" style="color:#4f46e5;">our Discord</a>' if discord else "our Discord"
+    html_body = (
+        '<!doctype html><html><body style="margin:0;padding:24px;background:#f4f4f5;'
+        'font-family:Arial,Helvetica,sans-serif;color:#18181b;">'
+        '<div style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:8px;padding:28px;">'
+        '<h1 style="font-size:20px;margin:0 0 12px;">Your Tracker Access key</h1>'
+        f'<p style="margin:0 0 16px;line-height:1.5;">Thanks for your purchase. Here is your {e(plan_name)} key:</p>'
+        '<p style="margin:0 0 20px;padding:14px;background:#f4f4f5;border-radius:6px;'
+        'font-family:Consolas,Menlo,monospace;font-size:18px;letter-spacing:0.5px;word-break:break-all;">'
+        f'{e(key)}</p>'
+        '<ol style="margin:0 0 16px;padding-left:20px;line-height:1.7;">'
+        f'<li>Open {discord_html}.</li>'
+        '<li>Run <b>/claim_key</b> and paste the key.</li></ol>'
+        '<p style="margin:0 0 20px;line-height:1.5;">Your time starts when you run the command, not when you paid.</p>'
+        '<p style="margin:0;font-size:13px;line-height:1.6;color:#52525b;">'
+        f'Order ID: <span style="font-family:Consolas,Menlo,monospace;">{e(order_id)}</span><br>'
+        f'<a href="{e(confirm_url)}" style="color:#4f46e5;">Open your confirmation page</a><br>'
+        'If anything goes wrong, open a support ticket in the Discord and quote the order ID.<br>'
+        'All sales are final, including lost keys, so keep this email.</p>'
+        '</div></body></html>'
+    )
+    return subject, text_body, html_body
+
+
+def build_mail_request(to: str, subject: str, text_body: str, html_body: str, idem: str | None = None):
+    """(url, headers, JSON body) for the configured email service."""
+    headers = {"Content-Type": "application/json", "Accept": "application/json",
+               "User-Agent": MAIL_USER_AGENT}
+    if MAIL_PROVIDER == "brevo":
+        name, address = parseaddr(MAIL_FROM)
+        sender  = {"email": address, **({"name": name} if name else {})}
+        payload = {"sender": sender, "to": [{"email": to}], "subject": subject,
+                   "textContent": text_body, "htmlContent": html_body}
+        if MAIL_REPLY_TO:
+            payload["replyTo"] = {"email": parseaddr(MAIL_REPLY_TO)[1] or MAIL_REPLY_TO}
+        headers["api-key"] = MAIL_API_KEY
+    else:
+        payload = {"from": MAIL_FROM, "to": [to], "subject": subject,
+                   "text": text_body, "html": html_body}
+        if MAIL_REPLY_TO:
+            payload["reply_to"] = MAIL_REPLY_TO
+        headers["Authorization"] = f"Bearer {MAIL_API_KEY}"
+        if idem:
+            headers["Idempotency-Key"] = idem
+    return MAIL_ENDPOINTS.get(MAIL_PROVIDER, MAIL_ENDPOINTS["resend"]), headers, json.dumps(payload).encode("utf-8")
+
+
+def send_mail(to: str, subject: str, text_body: str, html_body: str, idem: str | None = None) -> None:
+    """Hand one message to the email service. Raises MailError if it isn't accepted."""
+    url, headers, body = build_mail_request(to, subject, text_body, html_body, idem)
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=MAIL_TIMEOUT) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as exc:   # before URLError: HTTPError is a kind of URLError
+        try:
+            detail = exc.read(300).decode("utf-8", "replace")
+        except Exception:
+            detail = ""
+        raise MailError(f"{MAIL_PROVIDER} refused the email: HTTP {exc.code} {detail}".strip()) from None
+    except (urllib.error.URLError, OSError) as exc:
+        raise MailError(f"could not reach {MAIL_PROVIDER}: {exc}") from None
+    if not 200 <= status < 300:
+        raise MailError(f"{MAIL_PROVIDER} answered HTTP {status}")
+
+
+def claim_email_send(sid: str):
+    """Take the right to email this order's key, or None if it was sent, is being sent, has no
+    address, or was revoked. On success: {"key", "plan", "to"}."""
+    now = utcnow()
+    with engine.begin() as conn:
+        taken = conn.execute(text(CLAIM_EMAIL_SQL),
+                             {"now": now, "sid": sid, "cutoff": now - MAIL_RETRY_AFTER}).rowcount == 1
+        row = conn.execute(text(EMAIL_ORDER_SQL), {"sid": sid}).first() if taken else None
+    return {"key": row[0], "plan": row[1], "to": row[2]} if row is not None else None
+
+
+def mark_email_sent(sid: str) -> None:
+    with engine.begin() as conn:
+        conn.execute(text(MARK_EMAIL_SENT_SQL), {"now": utcnow(), "sid": sid})
+
+
+def send_key_email(sid, base: str) -> str:
+    """Email a paid order's key to the address it was bought with. Returns "off", "skipped",
+    "sent" or "failed", and never raises, so it is safe to run after the response. A failed send
+    is tried again by the next visit to the order's page once MAIL_RETRY_AFTER has passed.
+    The key itself is never logged."""
+    if not sid or not mail_enabled():
+        return "off"
+    try:
+        order = claim_email_send(sid)
+        if order is None:
+            return "skipped"
+        plan = PLANS.get(order["plan"])
+        subject, text_body, html_body = build_key_email(
+            order["key"], plan["name"] if plan else order["plan"], sid, base, SUPPORT_URL)
+        send_mail(order["to"], subject, text_body, html_body, idem=f"key-email-{sid}")
+        mark_email_sent(sid)
+    except MailError as exc:
+        log.error("Could not email the key for order %s: %s", sid, exc)
+        return "failed"
+    except Exception:
+        log.exception("Could not email the key for order %s", sid)
+        return "failed"
+    log.info("Emailed the key for order %s", sid)
+    return "sent"

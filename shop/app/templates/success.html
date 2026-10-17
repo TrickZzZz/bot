@@ -14,6 +14,9 @@
   <p class="key" id="key">{{ key }}</p>
   <p class="order">Order ID <code id="order-id">{{ order_id }}</code></p>
   <p class="order-note">If anything goes wrong, open a support ticket in the Discord and quote this order ID.</p>
+  {% if emailed and email_hint %}
+  <p class="order-note">We also emailed a copy of this key to {{ email_hint }}.</p>
+  {% endif %}
   <div class="actions">
     <button type="button" class="solid" data-copy="{{ key }}" data-label="Copy key" data-fallback="#key">Copy key</button>
     <button type="button" class="ghost" data-copy="/claim_key {{ key }}" data-label="Copy command" data-fallback="#key">Copy command</button>
