@@ -363,10 +363,10 @@ export default function DashboardPage({ onLogout }) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Bulk import</DialogTitle>
-            <DialogDescription>CSV (username,password,account_type,region), JSON array, or username|password|cookie (one per line).</DialogDescription>
+            <DialogDescription>CSV (username,password,account_type,region), JSON array, or username:password:cookie / username|password|cookie (one per line).</DialogDescription>
           </DialogHeader>
           <textarea value={importText} onChange={e => setImportText(e.target.value)} rows={10}
-            placeholder={'username,password,account_type,region\ncooluser123,DeltaCore,+30 days old,GB\n\nor:\ncooluser123|DeltaCore|.ROBLOSECURITY=abc123'}
+            placeholder={'username,password,account_type,region\ncooluser123,DeltaCore,+30 days old,GB\n\nor:\ncooluser123:DeltaCore:_|WARNING:-DO-NOT-SHARE-THIS...|_abc123'}
             className="w-full rounded-md border border-input bg-secondary/50 px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y" />
           <label className="flex items-center gap-2 text-sm text-muted-foreground mt-2">
             <input type="checkbox" checked={importAs30d} onChange={e => setImportAs30d(e.target.checked)}
@@ -405,14 +405,31 @@ function parseImport(text, forceType) {
   const lines = trimmed.split(/\r?\n/).filter(l => l.trim())
   if (lines.length === 0) return []
 
-  // username|password|cookie, one per line, no header row
-  if (lines.every(l => l.includes("|"))) {
+  // username|password|cookie or username:password:cookie, one per line, no header row.
+  // The cookie itself can contain both ":" and "|" (Roblox's .ROBLOSECURITY always starts
+  // with "_|WARNING:-DO-NOT-SHARE..."), so it's located by that fixed marker rather than
+  // by splitting the whole line on a delimiter.
+  if (lines.every(l => l.includes("|") || l.includes(":"))) {
     return lines.flatMap(line => {
-      const firstPipe = line.indexOf("|")
-      const secondPipe = line.indexOf("|", firstPipe + 1)
-      const username = (secondPipe === -1 ? line : line.slice(0, firstPipe)).trim()
-      const password = secondPipe === -1 ? "" : line.slice(firstPipe + 1, secondPipe).trim()
-      const cookie = secondPipe === -1 ? "" : line.slice(secondPipe + 1).trim()
+      const markerIdx = line.indexOf("_|WARNING")
+      let username, password, cookie
+      if (markerIdx !== -1) {
+        const prefix = line.slice(0, markerIdx).replace(/[:|]\s*$/, "")
+        cookie = line.slice(markerIdx).trim()
+        const delim = prefix.includes(":") ? ":" : "|"
+        const sep = prefix.indexOf(delim)
+        username = (sep === -1 ? prefix : prefix.slice(0, sep)).trim()
+        password = (sep === -1 ? "" : prefix.slice(sep + 1)).trim()
+      } else {
+        // No recognizable cookie marker (e.g. empty cookie, or a non-Roblox cookie) —
+        // fall back to splitting on the first two occurrences of whichever delimiter is used.
+        const delim = line.includes("|") ? "|" : ":"
+        const first = line.indexOf(delim)
+        const second = line.indexOf(delim, first + 1)
+        username = (second === -1 ? line : line.slice(0, first)).trim()
+        password = second === -1 ? "" : line.slice(first + 1, second).trim()
+        cookie = second === -1 ? "" : line.slice(second + 1).trim()
+      }
       if (!username || !password) return []
       return [applyForce({
         username, password,
