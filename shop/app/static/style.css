@@ -447,8 +447,9 @@ footer {
 }
 footer p { margin: 0.35rem 0 0; }
 footer strong { color: var(--text); }
-footer nav { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; }
-footer nav a { color: var(--muted); text-decoration: none; }
+footer nav { display: flex; flex-wrap: wrap; gap: 0 1.25rem; }
+/* Padding makes each link a comfortable thumb target (about 38px tall) without moving the row. */
+footer nav a { color: var(--muted); text-decoration: none; padding-block: 0.45rem; }
 footer nav a:hover { color: var(--text); }
 @media (min-width: 720px) {
   footer { width: calc(100% - 3rem); grid-template-columns: 1fr auto; align-items: center; }

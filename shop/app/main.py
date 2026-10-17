@@ -17,6 +17,7 @@ import logging
 import os
 import re
 import secrets
+import sys
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
@@ -26,15 +27,20 @@ from urllib.parse import parse_qs
 
 import stripe
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.exception_handlers import http_exception_handler
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import BigInteger, Column, DateTime, Integer, String, create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
 from starlette.concurrency import run_in_threadpool
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
+# stdout, not the default stderr: Railway labels everything on stderr as an error, which
+# made every normal "Issued a key" line look like a failure in the log view.
 logging.basicConfig(
+    stream=sys.stdout,
     level=os.environ.get("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
@@ -302,6 +308,18 @@ CSP = ("default-src 'self'; style-src 'self' https://fonts.googleapis.com; "
        "base-uri 'none'")
 
 
+VERSION_RE = re.compile(r"^[0-9a-f]{6,64}$")
+
+
+def static_cache_control(version: str | None) -> str:
+    """Files asked for with the content hash that asset() adds (?v=...) can be kept for a
+    year: when a file changes its URL changes too. Anything without a hash is checked
+    with the server on every visit (a cheap 304 when nothing changed)."""
+    if version and VERSION_RE.match(version):
+        return "public, max-age=31536000, immutable"
+    return "no-cache"
+
+
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     resp = await call_next(request)
@@ -310,10 +328,8 @@ async def security_headers(request: Request, call_next):
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "no-referrer")
     resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
-    if request.url.path.startswith("/static/"):
-        # Check with the server on every visit (a cheap 304 when nothing changed)
-        # instead of letting a browser guess how long a file stays fresh.
-        resp.headers.setdefault("Cache-Control", "no-cache")
+    if request.url.path.startswith("/static/") and resp.status_code in (200, 304):
+        resp.headers.setdefault("Cache-Control", static_cache_control(request.query_params.get("v")))
     return resp
 
 
@@ -344,6 +360,7 @@ async def read_form(request: Request, limit: int = 4096) -> dict:
 
 
 @app.get("/")
+@app.head("/")
 def index(request: Request):
     # The plan that costs least per day gets the "Best value" tag.
     best = min(PLANS, key=lambda pid: PLANS[pid]["pence"] / PLANS[pid]["days"])
@@ -359,6 +376,7 @@ def index(request: Request):
 
 
 @app.get("/terms")
+@app.head("/terms")
 def terms(request: Request):
     d = date.fromisoformat(TOS_VERSION)
     return render(request, "terms.html", updated=f"{d.day} {d:%B %Y}")
@@ -412,7 +430,7 @@ async def start_checkout(request: Request, plan_id: str, form: dict | None = Non
                 },
             }],
             success_url=f"{base}/success?session_id={{CHECKOUT_SESSION_ID}}",
-            cancel_url=f"{base}/",
+            cancel_url=f"{base}/#keys",
             # The terms version and time are kept on the payment as a record of consent.
             metadata={"plan": plan_id,
                       "tos_version": TOS_VERSION,
@@ -522,10 +540,39 @@ def success(request: Request, session_id: str = ""):
 
 
 @app.get("/health")
+@app.head("/health")
 def health():
     return {"ok": True, "checkout": bool(STRIPE_SECRET_KEY), "webhook": bool(STRIPE_WEBHOOK_SECRET)}
 
 
 @app.get("/robots.txt")
+@app.head("/robots.txt")
 def robots():
     return PlainTextResponse("User-agent: *\nDisallow: /success\nDisallow: /stripe/\n")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+@app.head("/favicon.ico", include_in_schema=False)
+def favicon():
+    """Browsers and link checkers ask for /favicon.ico whatever the page's <link> says."""
+    return FileResponse(BASE_DIR / "static" / "favicon.png", media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.exception_handler(StarletteHTTPException)
+async def http_error(request: Request, exc: StarletteHTTPException):
+    """A visitor who lands on a wrong address or a link that needs the Buy button gets a
+    page from the shop, not a bare JSON error. Files under /static and Stripe's webhook keep
+    the plain response, and every other error is handled as before."""
+    path = request.url.path
+    if exc.status_code in (404, 405) and not path.startswith(("/static/", "/stripe/")):
+        if exc.status_code == 404:
+            resp = message(request, "Page not found",
+                           "That page doesn't exist. Head back to the shop to choose a key.", 404)
+        else:
+            resp = message(request, "Can't open that here",
+                           "That address only works from the shop's Buy button. Head back and choose your key.", 405)
+        for name, value in (exc.headers or {}).items():  # keeps the Allow header on a 405
+            resp.headers[name] = value
+        return resp
+    return await http_exception_handler(request, exc)
