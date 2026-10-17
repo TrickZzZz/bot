@@ -66,6 +66,7 @@ export default function DashboardPage({ onLogout }) {
   const [importOpen, setImportOpen] = React.useState(false)
   const [importText, setImportText] = React.useState("")
   const [importing, setImporting] = React.useState(false)
+  const [importAs30d, setImportAs30d] = React.useState(false)
 
   const load = React.useCallback(async (q = "", t = "") => {
     setLoading(true)
@@ -149,7 +150,7 @@ export default function DashboardPage({ onLogout }) {
   const runImport = async () => {
     setImporting(true)
     try {
-      const parsed = parseImport(importText)
+      const parsed = parseImport(importText, importAs30d ? "+30 days old" : null)
       if (!parsed.length) { toast({ title: "Nothing to import", variant: "destructive" }); return }
       const result = await api.bulkImport(parsed)
       toast({
@@ -157,7 +158,7 @@ export default function DashboardPage({ onLogout }) {
         description: `${result.created} created/updated, ${result.failed} failed.`,
         variant: result.failed > 0 ? "destructive" : "default",
       })
-      setImportOpen(false); setImportText(""); load(search, typeFilter)
+      setImportOpen(false); setImportText(""); setImportAs30d(false); load(search, typeFilter)
     } catch (err) {
       toast({ title: "Import failed", description: err.message, variant: "destructive" })
     } finally { setImporting(false) }
@@ -362,11 +363,16 @@ export default function DashboardPage({ onLogout }) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Bulk import</DialogTitle>
-            <DialogDescription>CSV (username,password,account_type,region) or JSON array.</DialogDescription>
+            <DialogDescription>CSV (username,password,account_type,region), JSON array, or username|password|cookie (one per line).</DialogDescription>
           </DialogHeader>
           <textarea value={importText} onChange={e => setImportText(e.target.value)} rows={10}
-            placeholder={'username,password,account_type,region\ncooluser123,DeltaCore,+30 days old,GB'}
+            placeholder={'username,password,account_type,region\ncooluser123,DeltaCore,+30 days old,GB\n\nor:\ncooluser123|DeltaCore|.ROBLOSECURITY=abc123'}
             className="w-full rounded-md border border-input bg-secondary/50 px-3 py-2 text-sm font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y" />
+          <label className="flex items-center gap-2 text-sm text-muted-foreground mt-2">
+            <input type="checkbox" checked={importAs30d} onChange={e => setImportAs30d(e.target.checked)}
+              className="h-4 w-4 rounded border-input" />
+            Set all imported accounts to "+30 days old"
+          </label>
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setImportOpen(false)}>Cancel</Button>
             <Button onClick={runImport} disabled={importing || !importText.trim()}>
@@ -379,20 +385,42 @@ export default function DashboardPage({ onLogout }) {
   )
 }
 
-function parseImport(text) {
+function parseImport(text, forceType) {
   const trimmed = text.trim()
   if (!trimmed) return []
+  const applyForce = r => forceType ? { ...r, account_type: forceType } : r
+
   if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
     const data = JSON.parse(trimmed)
     const arr = Array.isArray(data) ? data : [data]
-    return arr.filter(r => r.username && r.password).map(r => ({
+    return arr.filter(r => r.username && r.password).map(r => applyForce({
       username:     String(r.username),
       password:     String(r.password),
       account_type: String(r.account_type || "+30 days old"),
+      cookie:       String(r.cookie || ""),
       region:       String(r.region || ""),
     }))
   }
+
   const lines = trimmed.split(/\r?\n/).filter(l => l.trim())
+  if (lines.length === 0) return []
+
+  // username|password|cookie, one per line, no header row
+  if (lines.every(l => l.includes("|"))) {
+    return lines.flatMap(line => {
+      const parts = line.split("|")
+      const username = parts[0]?.trim()
+      const password = parts[1]?.trim()
+      if (!username || !password) return []
+      return [applyForce({
+        username, password,
+        account_type: "+30 days old",
+        cookie: parts[2]?.trim() || "",
+        region: "",
+      })]
+    })
+  }
+
   if (lines.length < 2) return []
   const headers = splitCsvLine(lines[0]).map(h => h.trim().toLowerCase())
   const idx = name => headers.indexOf(name)
@@ -401,10 +429,11 @@ function parseImport(text) {
     const username = cells[idx("username")]?.trim()
     const password = cells[idx("password")]?.trim()
     if (!username || !password) return []
-    return [{ username, password,
+    return [applyForce({ username, password,
       account_type: cells[idx("account_type")]?.trim() || "+30 days old",
+      cookie: cells[idx("cookie")]?.trim() || "",
       region: cells[idx("region")]?.trim() || "",
-    }]
+    })]
   })
 }
 
