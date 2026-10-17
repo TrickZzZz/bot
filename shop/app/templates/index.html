@@ -113,7 +113,7 @@
     </li>
     <li>
       <strong>Copy your key</strong>
-      <p>It shows on the confirmation page as soon as the payment goes through{% if email_on %}, and we email a copy to the address you paid with{% endif %}.</p>
+      <p>It shows on the confirmation page as soon as the payment goes through.</p>
     </li>
     <li>
       <strong>Claim it in Discord</strong>
@@ -141,11 +141,7 @@
     </details>
     <details>
       <summary>I lost my key.</summary>
-      {% if email_on %}
-      <p>Check the inbox of the email you paid with, since we send a copy of every key there (look in spam too). You can also open the confirmation page again from the link Stripe sent you back to. If both are gone, open a support ticket in our Discord and have the email you paid with ready. Lost keys can't be refunded.</p>
-      {% else %}
       <p>Open the confirmation page again from the link Stripe sent you back to. If that's gone, open a support ticket in our Discord and have the email you paid with ready. Lost keys can't be refunded.</p>
-      {% endif %}
     </details>
     <details>
       <summary>Can I get a refund?</summary>
