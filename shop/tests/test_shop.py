@@ -360,6 +360,20 @@ class CheckoutTests(ShopCase):
         self.assertIn("switched on yet", html)
         self.assertIn("disabled", html)
 
+    def test_shop_page_warns_in_bold_above_the_buy_form_that_matcha_is_not_supported(self):
+        warning = "<strong>This script will not work on Matcha.</strong>"
+        for label, setup in (("checkout open", lambda: None),
+                             ("checkout locked", lambda: self.patch(main, "STRIPE_SECRET_KEY", ""))):
+            with self.subTest(page=label):
+                setup()
+                html = main.index(stubs.make_request("/")).body.decode()
+                self.assertEqual(html.count(warning), 1)
+                keys_section, form = html.index('id="keys"'), html.index('<form class="buy-form"')
+                self.assertLess(keys_section, html.index(warning))          # inside the key section...
+                self.assertLess(html.index(warning), form)                  # ...and above the purchase form
+        css = (HERE.parent / "app" / "static" / "style.css").read_text()
+        self.assertRegex(css, r"\.warning\s*\{")                           # the class the line uses is styled
+
     def test_shop_page_says_sold_out_when_no_key_can_be_issued(self):
         self.patch(main, "luarmor", Luarmor("", ""))               # API unusable, and no stock
         html = main.index(stubs.make_request("/")).body.decode()

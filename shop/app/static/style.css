@@ -339,6 +339,14 @@ button:disabled { background: var(--surface-2); color: var(--muted); box-shadow:
   background: var(--surface); border-left: 3px solid var(--fuchsia); border-radius: 6px;
 }
 
+/* Compatibility warning right above the buy form */
+.warning {
+  margin: 0 0 1.25rem; padding: 0.9rem 1.1rem;
+  background: rgba(251, 191, 36, 0.09); border: 1px solid rgba(251, 191, 36, 0.55); border-radius: 12px;
+  color: #FCD34D; font-size: 1.1rem; line-height: 1.4;
+}
+.warning strong { font-weight: 800; }
+
 /* Terms box above the key cards */
 .terms {
   margin-bottom: 1.5rem; padding: 1.25rem 1.5rem;
