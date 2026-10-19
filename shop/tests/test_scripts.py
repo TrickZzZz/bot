@@ -69,8 +69,8 @@ class ScriptCase(ShopCase):
     def page(self, auth=None, headers=None, ip="203.0.113.9"):
         return self.call(main.admin_page, "/admin", auth=auth or bearer(PASSWORD), headers=headers, ip=ip)
 
-    def fetch(self, token, ip="198.51.100.7"):
-        return self.call(main.script_file, f"/l/{token}", ip=ip, token=token)
+    def fetch(self, token, ip="198.51.100.7", headers=None):
+        return self.call(main.script_file, f"/l/{token}", ip=ip, headers=headers, token=token)
 
     def data(self, resp):
         return json.loads(resp.body)
@@ -164,6 +164,118 @@ class ServingTests(ScriptCase):
         self.patch(main, "SCRIPT_FETCHES_PER_MIN", 3)
         statuses = [self.fetch("B" * 32, ip="198.51.100.3").status_code for _ in range(5)]
         self.assertEqual(statuses, [404, 404, 404, 429, 429])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+UA_CHROME = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+             "Chrome/130.0.0.0 Safari/537.36")
+ACCEPT_PAGE = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
+
+# What real browsers send when a person opens the address (typed, clicked or pasted into a tab).
+BROWSER_PAGE_LOADS = {
+    "chrome tab": {"user-agent": UA_CHROME, "accept": ACCEPT_PAGE,
+                   "sec-fetch-mode": "navigate", "sec-fetch-dest": "document", "sec-fetch-site": "none"},
+    "firefox tab": {"user-agent": "Mozilla/5.0 (Windows NT 10.0; rv:131.0) Gecko/20100101 Firefox/131.0",
+                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "sec-fetch-mode": "navigate", "sec-fetch-dest": "document"},
+    "older safari, no sec-fetch headers": {
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/15.6 Safari/605.1.15",
+        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+    "page inside a frame": {"user-agent": UA_CHROME, "accept": ACCEPT_PAGE,
+                            "sec-fetch-mode": "navigate", "sec-fetch-dest": "iframe"},
+    "sec-fetch headers alone": {"sec-fetch-mode": "navigate", "sec-fetch-dest": "document"},
+    "navigation mode alone": {"sec-fetch-mode": "navigate"},
+    "document destination alone": {"sec-fetch-dest": "document"},
+    "iframe destination alone": {"sec-fetch-dest": "iframe"},
+    "frame destination alone": {"sec-fetch-dest": "frame"},
+    "embed destination alone": {"sec-fetch-dest": "embed"},
+    "object destination alone": {"sec-fetch-dest": "object"},
+    "accept and user agent in capitals": {"user-agent": "MOZILLA/5.0 (X11)", "accept": "TEXT/HTML,*/*;q=0.8"},
+    "navigation mode in capitals": {"sec-fetch-mode": "NAVIGATE"},
+    "document destination in capitals": {"sec-fetch-dest": "DOCUMENT"},
+}
+
+# What a game executor's HttpGet (curl, Python, a script) sends: no page headers.
+SCRIPT_CLIENTS = {
+    "no headers at all": {},
+    "accept anything": {"accept": "*/*"},
+    "roblox user agent": {"user-agent": "Roblox/WinInet", "accept": "*/*"},
+    "curl": {"user-agent": "curl/8.5.0", "accept": "*/*"},
+    "python requests": {"user-agent": "python-requests/2.32.3", "accept-encoding": "gzip, deflate",
+                        "accept": "*/*"},
+    # An unknown executor must never be mistaken for a person: html in Accept alone is not a browser.
+    "html accepted but not a browser": {"user-agent": "SomeExecutor/1.0", "accept": "text/html"},
+    "html accepted and no user agent": {"accept": "text/html"},
+    "browser user agent but not asking for a page": {"user-agent": UA_CHROME, "accept": "*/*"},
+    "page script fetch()": {"user-agent": UA_CHROME, "accept": "*/*", "sec-fetch-mode": "cors",
+                            "sec-fetch-dest": "empty", "sec-fetch-site": "cross-site"},
+    "page <script src>": {"user-agent": UA_CHROME, "accept": "*/*", "sec-fetch-mode": "no-cors",
+                          "sec-fetch-dest": "script"},
+}
+
+
+class BrowserVisitTests(ScriptCase):
+    """A person who opens the link in a browser lands on the home page and never sees the script;
+    the executor that runs the loadstring still gets it."""
+
+    def test_a_browser_opening_the_link_is_sent_to_the_home_page(self):
+        token, _ = self.add()
+        for label, headers in BROWSER_PAGE_LOADS.items():
+            with self.subTest(client=label):
+                resp = self.fetch(token, headers=headers)
+                self.assertEqual((resp.status_code, resp.headers["location"]), (302, "/"))
+                self.assertEqual(resp.body, b"")
+                self.assertNotIn(SCRIPT.strip().encode(), resp.body)
+
+    def test_the_redirect_is_temporary_and_never_cached(self):
+        token, _ = self.add()
+        resp = self.fetch(token, headers=BROWSER_PAGE_LOADS["chrome tab"])
+        self.assertEqual(resp.status_code, 302)           # not 301: a browser would remember it for good
+        self.assertEqual(resp.headers["cache-control"], "no-store")
+        self.assertEqual(resp.headers["x-robots-tag"], "noindex")
+
+    def test_the_executor_and_other_scripts_still_get_the_script(self):
+        token, _ = self.add()
+        for label, headers in SCRIPT_CLIENTS.items():
+            with self.subTest(client=label):
+                resp = self.fetch(token, headers=headers)
+                self.assertEqual((resp.status_code, resp.body), (200, SCRIPT.encode()))
+                self.assertTrue(resp.headers["content-type"].startswith("text/plain"))
+
+    def test_a_browser_gets_the_same_answer_for_a_real_link_and_a_made_up_one(self):
+        token, _ = self.add()
+        real = self.fetch(token, headers=BROWSER_PAGE_LOADS["chrome tab"])
+        fake = self.fetch("Z" * 32, headers=BROWSER_PAGE_LOADS["chrome tab"])
+        junk = self.fetch("short", headers=BROWSER_PAGE_LOADS["chrome tab"])
+        for resp in (real, fake, junk):
+            self.assertEqual((resp.status_code, resp.headers["location"]), (302, "/"))
+        # while a script client still learns that a made-up link is wrong
+        self.assertEqual(self.fetch("Z" * 32, headers=SCRIPT_CLIENTS["curl"]).status_code, 404)
+
+    def test_a_browser_visit_is_not_counted_and_does_not_touch_the_database(self):
+        token, _ = self.add()
+        with mock.patch.object(main, "serve_script") as lookup:
+            for _ in range(3):
+                self.fetch(token, headers=BROWSER_PAGE_LOADS["chrome tab"])
+            lookup.assert_not_called()
+        row = self.script_rows()[0]
+        self.assertEqual((row["hits"], row["last_hit_at"]), (0, None))
+        self.fetch(token, headers=SCRIPT_CLIENTS["roblox user agent"])
+        self.assertEqual(self.script_rows()[0]["hits"], 1)
+
+    def test_browser_visits_neither_use_up_nor_are_stopped_by_the_fetch_limit(self):
+        self.patch(main, "SCRIPT_FETCHES_PER_MIN", 2)
+        token, _ = self.add()
+        page = BROWSER_PAGE_LOADS["chrome tab"]
+        ip = "198.51.100.40"
+        self.assertEqual([self.fetch(token, ip=ip, headers=page).status_code for _ in range(5)], [302] * 5)
+        self.assertEqual([self.fetch(token, ip=ip).status_code for _ in range(2)], [200, 200])   # quota untouched
+        self.assertEqual(self.fetch(token, ip=ip).status_code, 429)                              # now spent
+        self.assertEqual(self.fetch(token, ip=ip, headers=page).status_code, 302)                # still sent home
+
+    def test_a_browser_is_sent_home_even_with_a_hosted_script_that_does_not_exist_yet(self):
+        resp = self.fetch("Q" * 32, headers=BROWSER_PAGE_LOADS["firefox tab"])
+        self.assertEqual((resp.status_code, resp.headers["location"]), (302, "/"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

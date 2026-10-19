@@ -46,6 +46,8 @@ no key. A script uploaded on /admin is served as plain text at /l/<token>, so it
     loadstring(game:HttpGet("https://<site>/l/<token>"))()
 The token is random, so only people who were given the link can find it, but anyone who has the
 link can run the script. "New link" on /admin changes the token and the old link stops working.
+A browser that opens the link is sent to the home page instead of being shown the script; the
+executor's HttpGet still gets it. That is a courtesy, not security: curl can send any header.
 """
 import base64
 import binascii
@@ -1023,6 +1025,7 @@ SCRIPT_FETCHES_PER_MIN = 30     # per address; a loader runs once, so this only 
 ADMIN_TOKEN_MIN        = 24
 ADMIN_FAILS_PER_MIN    = 10     # wrong passwords per address before it is told to wait
 NO_STORE               = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
+BROWSER_DESTINATIONS   = {"document", "iframe", "frame", "embed", "object"}   # Sec-Fetch-Dest of a page load
 
 SCRIPT_SERVE_SQL  = ("UPDATE hosted_scripts SET hits = hits + 1, last_hit_at = :now "
                      "WHERE token = :token RETURNING body")
@@ -1144,9 +1147,29 @@ def admin_error(message_text: str, status: int) -> JSONResponse:
     return JSONResponse({"error": message_text}, status_code=status, headers=NO_STORE)
 
 
+def opened_as_a_page(request: Request) -> bool:
+    """True when a person opened the link in a browser tab rather than a game executor running
+    the loadstring. A browser says so itself: every page it opens carries Sec-Fetch-Mode: navigate
+    and Sec-Fetch-Dest: document (or a frame), and older ones ask for text/html under a Mozilla
+    user agent. An HttpGet sends none of that. A client that asks for text/html but doesn't call
+    itself a browser still gets the script, so an executor with odd headers isn't turned away.
+    Headers can be faked by anyone running curl, so this keeps curious people off the source; it
+    doesn't stop someone who is determined."""
+    headers = request.headers
+    if headers.get("sec-fetch-mode", "").lower() == "navigate":
+        return True
+    if headers.get("sec-fetch-dest", "").lower() in BROWSER_DESTINATIONS:
+        return True
+    return "text/html" in headers.get("accept", "").lower() and "mozilla" in headers.get("user-agent", "").lower()
+
+
 @app.get("/l/{token}")
 async def script_file(request: Request, token: str):
-    """The hosted script as plain text, for loadstring(game:HttpGet(...))()."""
+    """The hosted script as plain text, for loadstring(game:HttpGet(...))(). A browser that opens
+    the link is sent to the home page instead, whether or not the link is real, so the address
+    shows nothing to someone who only pastes it into a tab."""
+    if opened_as_a_page(request):
+        return RedirectResponse("/", status_code=302, headers=NO_STORE)
     ip = request.client.host if request.client else "unknown"
     if rate_limited(f"l:{ip}", SCRIPT_FETCHES_PER_MIN):
         return PlainTextResponse("Too many requests. Wait a minute.", status_code=429,
