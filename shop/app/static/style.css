@@ -347,6 +347,23 @@ button:disabled { background: var(--surface-2); color: var(--muted); box-shadow:
 }
 .warning strong { font-weight: 800; }
 
+/* Hosted scripts page (/admin) */
+.hosted { margin-top: 1.25rem; padding: 1.25rem; background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+.hosted-name { margin: 0 0 0.75rem; font-size: 1.05rem; font-weight: 700; }
+.loadline {
+  margin: 0; padding: 0.9rem 1rem;
+  font-family: var(--mono); font-size: 0.9rem; line-height: 1.5;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px;
+  word-break: break-all; user-select: all;
+}
+.upload { display: grid; gap: 1rem; max-width: 28rem; }
+.field { display: grid; gap: 0.4rem; font-weight: 600; }
+.field input {
+  padding: 0.7rem 0.85rem; font: inherit; font-weight: 400; color: var(--text);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 10px;
+}
+.field input:focus-visible { outline: 2px solid var(--fuchsia); outline-offset: 2px; }
+
 /* Terms box above the key cards */
 .terms {
   margin-bottom: 1.5rem; padding: 1.25rem 1.5rem;

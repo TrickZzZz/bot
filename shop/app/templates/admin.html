@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Hosted scripts{% endblock %}
+
+{% block head %}<meta name="robots" content="noindex"><script src="{{ asset('admin.js') }}" defer></script>{% endblock %}
+
+{% block main %}
+<section class="intro">
+  <h1>Hosted scripts</h1>
+  <p class="lede">Copy a loadstring and share it. Anyone who has the link can run the script, so only post it where you mean to.</p>
+</section>
+
+<section aria-labelledby="scripts-h">
+  <h2 id="scripts-h" class="vh">Scripts</h2>
+  {% for s in scripts %}
+  <article class="hosted">
+    <h3 class="hosted-name">{{ s.name }}</h3>
+    <p class="loadline" id="line-{{ loop.index }}">{{ s.line }}</p>
+    <p class="order">{{ s.size }}, SHA-256 {{ s.sha }}. Opened {{ s.hits }} times, last {{ s.last }}. Updated {{ s.updated }}.</p>
+    <div class="actions">
+      <button type="button" class="solid" data-copy="{{ s.line }}" data-label="Copy loadstring" data-fallback="#line-{{ loop.index }}">Copy loadstring</button>
+      <button type="button" class="ghost" data-admin="rotate" data-name="{{ s.name }}">New link</button>
+      <button type="button" class="ghost" data-admin="remove" data-name="{{ s.name }}">Remove</button>
+    </div>
+  </article>
+  {% else %}
+  <p class="notice">Nothing is hosted yet. Upload a script below.</p>
+  {% endfor %}
+</section>
+
+<section aria-labelledby="upload-h">
+  <div class="section-head">
+    <h2 id="upload-h">Upload a script</h2>
+    <p>A name you haven't used makes a new link. An existing name replaces the script and keeps its link.</p>
+  </div>
+  <form class="upload" id="upload-form">
+    <label class="field">Name
+      <input id="script-name" name="name" value="v4" maxlength="32" pattern="[a-z0-9][a-z0-9_\-]{0,31}" required autocomplete="off">
+    </label>
+    <label class="field">File
+      <input id="script-file" type="file" accept=".lua,.txt,text/plain" required>
+    </label>
+    <button type="submit" class="solid">Upload</button>
+  </form>
+  <p class="notice" id="admin-status" role="status" hidden></p>
+</section>
+{% endblock %}

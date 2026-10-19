@@ -43,6 +43,10 @@ class String(Integer):
     pass
 
 
+class Text(String):
+    pass
+
+
 class DateTime(Integer):
     pass
 
@@ -196,7 +200,7 @@ class FastAPI:
     def _decorator(self, *a, **kw):
         return lambda fn: fn
 
-    get = head = post = middleware = exception_handler = _decorator
+    get = head = post = put = delete = middleware = exception_handler = _decorator
 
     def mount(self, *a, **kw):
         pass
@@ -257,7 +261,8 @@ def install():
     os.environ.setdefault("DATABASE_URL", "sqlite://")
     for var in ("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "LUARMOR_API_KEY",
                 "LUARMOR_PROJECT_ID", "LUARMOR_API_URL", "LUARMOR_USE_API",
-                "LUARMOR_STOCK_DAY", "LUARMOR_STOCK_WEEK", "LUARMOR_STOCK_MONTH"):
+                "LUARMOR_STOCK_DAY", "LUARMOR_STOCK_WEEK", "LUARMOR_STOCK_MONTH",
+                "SCRIPT_ADMIN_TOKEN"):
         os.environ.pop(var, None)
     sqlite3.register_adapter(datetime, _adapt_datetime)
     sqlite3.register_converter("TIMESTAMP", lambda b: datetime.fromisoformat(b.decode()))
@@ -268,12 +273,13 @@ def install():
         "fastapi.exception_handlers", http_exception_handler=_http_exception_handler)
     sys.modules["fastapi.responses"] = _module(
         "fastapi.responses", FileResponse=_responses.FileResponse, JSONResponse=_responses.JSONResponse,
-        PlainTextResponse=_responses.PlainTextResponse, RedirectResponse=_responses.RedirectResponse)
+        PlainTextResponse=_responses.PlainTextResponse, RedirectResponse=_responses.RedirectResponse,
+        Response=_responses.Response)
     sys.modules["fastapi.staticfiles"] = _module("fastapi.staticfiles", StaticFiles=StaticFiles)
     sys.modules["fastapi.templating"] = _module("fastapi.templating", Jinja2Templates=Jinja2Templates)
     sys.modules["sqlalchemy"] = _module(
         "sqlalchemy", BigInteger=BigInteger, Column=Column, DateTime=DateTime, Integer=Integer,
-        String=String, create_engine=lambda *a, **kw: engine, text=TextClause)
+        String=String, Text=Text, create_engine=lambda *a, **kw: engine, text=TextClause)
     sys.modules["sqlalchemy.exc"] = _module("sqlalchemy.exc", IntegrityError=IntegrityError)
     sys.modules["sqlalchemy.orm"] = _module(
         "sqlalchemy.orm", declarative_base=declarative_base,

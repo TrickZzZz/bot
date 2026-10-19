@@ -25,6 +25,8 @@ Environment:
   SITE_URL               public base URL, e.g. https://keys.example.com (optional)
   SUPPORT_URL            Discord invite shown on the site (optional)
   LOG_LEVEL              default INFO
+  SCRIPT_ADMIN_TOKEN     password for /admin, where scripts are hosted (24+ characters; until it
+                         is set, /admin and the upload routes answer as if they did not exist)
 
 Stock keys must be made in the Luarmor dashboard to last N days from first use, not until a
 fixed date, or the time would run out before the buyer starts. The variables are read when the
@@ -38,8 +40,17 @@ to be blacklisted by hand: the shop logs a "BLACKLIST BY HAND" line with the key
 
 For Stripe, send the checkout.session.completed and charge.dispute.created events to
 /stripe/webhook. A disputed payment revokes its key here and blacklists it on Luarmor.
+
+Hosted scripts are separate from the shop: nothing on the storefront mentions them and they need
+no key. A script uploaded on /admin is served as plain text at /l/<token>, so its loadstring is
+    loadstring(game:HttpGet("https://<site>/l/<token>"))()
+The token is random, so only people who were given the link can find it, but anyone who has the
+link can run the script. "New link" on /admin changes the token and the old link stops working.
 """
+import base64
+import binascii
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -56,10 +67,10 @@ from urllib.parse import parse_qs
 import stripe
 from fastapi import FastAPI, Request
 from fastapi.exception_handlers import http_exception_handler
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import BigInteger, Column, DateTime, Integer, String, create_engine, text
+from sqlalchemy import BigInteger, Column, DateTime, Integer, String, Text, create_engine, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
 from starlette.concurrency import run_in_threadpool
@@ -99,6 +110,8 @@ STRIPE_SECRET_KEY     = _env("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
 SITE_URL              = _env("SITE_URL").rstrip("/")
 SUPPORT_URL           = _env("SUPPORT_URL")
+# Password of the /admin page (hosted scripts). Shorter than 24 characters counts as not set.
+SCRIPT_ADMIN_TOKEN    = _env("SCRIPT_ADMIN_TOKEN")
 LUARMOR_API_KEY       = _env("LUARMOR_API_KEY")
 LUARMOR_PROJECT_ID    = _env("LUARMOR_PROJECT_ID")
 LUARMOR_API_URL       = _env("LUARMOR_API_URL", DEFAULT_API_URL)
@@ -186,6 +199,22 @@ class LuarmorStock(Base):
     added_at    = Column(DateTime(timezone=True), default=utcnow)
     order_ref   = Column(String(200), unique=True, nullable=True)
     assigned_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class HostedScript(Base):
+    """A script served at /l/<token>. The random token is the whole address; `name` is only
+    the label shown on /admin."""
+    __tablename__ = "hosted_scripts"
+    id          = Column(Integer, primary_key=True)
+    name        = Column(String(32), unique=True, nullable=False)
+    token       = Column(String(64), unique=True, nullable=False)
+    body        = Column(Text, nullable=False)
+    size        = Column(Integer, nullable=False)       # bytes, as uploaded
+    sha256      = Column(String(64), nullable=False)    # of the uploaded bytes
+    hits        = Column(Integer, nullable=False, default=0)
+    created_at  = Column(DateTime(timezone=True), default=utcnow)
+    updated_at  = Column(DateTime(timezone=True), default=utcnow)
+    last_hit_at = Column(DateTime(timezone=True), nullable=True)
 
 
 # Columns the shop owns on license_keys (the bot's own copy of the table doesn't map them).
@@ -597,12 +626,16 @@ def find_order(session_id: str):
 _hits: dict = {}
 
 
-def rate_limited(ip: str, limit: int = 8, window: float = 60.0) -> bool:
+def rate_limited(ip: str, limit: int = 8, window: float = 60.0, record: bool = True) -> bool:
+    """True when `ip` has already used `limit` attempts inside the window. A call counts as an
+    attempt unless record is False, which only looks."""
     now    = time.monotonic()
     recent = [t for t in _hits.get(ip, []) if now - t < window]
     if len(recent) >= limit:
         _hits[ip] = recent
         return True
+    if not record:
+        return False
     recent.append(now)
     _hits[ip] = recent
     if len(_hits) > 5000:  # keep memory bounded
@@ -980,13 +1013,226 @@ def favicon():
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
+# ── Hosted scripts ─────────────────────────────────────────────────────────
+# Nothing on the storefront links here; see the module docstring. The SQL sits in constants so the
+# tests run these exact statements on a scratch database.
+SCRIPT_NAME_RE         = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+SCRIPT_TOKEN_RE        = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
+SCRIPT_MAX_BYTES       = 8 * 1024 * 1024
+SCRIPT_FETCHES_PER_MIN = 30     # per address; a loader runs once, so this only slows scraping
+ADMIN_TOKEN_MIN        = 24
+ADMIN_FAILS_PER_MIN    = 10     # wrong passwords per address before it is told to wait
+NO_STORE               = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
+
+SCRIPT_SERVE_SQL  = ("UPDATE hosted_scripts SET hits = hits + 1, last_hit_at = :now "
+                     "WHERE token = :token RETURNING body")
+SCRIPT_EXISTS_SQL = "SELECT 1 FROM hosted_scripts WHERE name = :name"
+# A new name gets the token passed in; an existing name keeps its own, so the link people
+# already have keeps working after the script is replaced.
+SCRIPT_SAVE_SQL   = ("INSERT INTO hosted_scripts (name, token, body, size, sha256, hits, created_at, updated_at) "
+                     "VALUES (:name, :token, :body, :size, :sha, 0, :now, :now) "
+                     "ON CONFLICT (name) DO UPDATE SET body = excluded.body, size = excluded.size, "
+                     "sha256 = excluded.sha256, updated_at = excluded.updated_at "
+                     "RETURNING token")
+SCRIPT_LIST_SQL   = ("SELECT name, token, size, sha256, hits, updated_at, last_hit_at "
+                     "FROM hosted_scripts ORDER BY name")
+SCRIPT_ROTATE_SQL = "UPDATE hosted_scripts SET token = :token, updated_at = :now WHERE name = :name"
+SCRIPT_DELETE_SQL = "DELETE FROM hosted_scripts WHERE name = :name"
+
+
+def admin_enabled() -> bool:
+    return len(SCRIPT_ADMIN_TOKEN) >= ADMIN_TOKEN_MIN
+
+
+def script_loadstring(base: str, token: str) -> str:
+    return f'loadstring(game:HttpGet("{base}/l/{token}"))()'
+
+
+def size_text(size: int) -> str:
+    return f"{size / 1024:,.0f} KB" if size >= 1024 else f"{size} bytes"
+
+
+def serve_script(token: str):
+    """The script's text, counting the visit. None when no script has that token."""
+    with engine.begin() as conn:
+        row = conn.execute(text(SCRIPT_SERVE_SQL), {"token": token, "now": utcnow()}).first()
+    return row[0] if row else None
+
+
+def save_script(name: str, body: str, size: int, sha: str):
+    """Store a script under `name`. Returns (token, created)."""
+    with engine.begin() as conn:
+        existed = conn.execute(text(SCRIPT_EXISTS_SQL), {"name": name}).first() is not None
+        row = conn.execute(text(SCRIPT_SAVE_SQL), {
+            "name": name, "token": secrets.token_urlsafe(24), "body": body,
+            "size": size, "sha": sha, "now": utcnow()}).first()
+    return row[0], not existed
+
+
+def list_scripts() -> list:
+    with engine.begin() as conn:
+        return [tuple(r) for r in conn.execute(text(SCRIPT_LIST_SQL)).fetchall()]
+
+
+def rotate_script(name: str):
+    """Give a script a new random token. Returns it, or None when no script has that name."""
+    token = secrets.token_urlsafe(24)
+    with engine.begin() as conn:
+        changed = conn.execute(text(SCRIPT_ROTATE_SQL),
+                               {"name": name, "token": token, "now": utcnow()}).rowcount
+    return token if changed else None
+
+
+def delete_script(name: str) -> bool:
+    with engine.begin() as conn:
+        return bool(conn.execute(text(SCRIPT_DELETE_SQL), {"name": name}).rowcount)
+
+
+async def read_capped(request: Request, limit: int):
+    """The request body, or None when it is longer than `limit` bytes."""
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def admin_password(request: Request):
+    """(password, from_browser) taken from the Authorization header: Basic auth, with any user
+    name and the admin token as the password (what the browser's sign-in box sends), or
+    'Bearer <token>' for a script. ('', False) when nothing usable was sent."""
+    scheme, _, value = request.headers.get("authorization", "").partition(" ")
+    scheme, value = scheme.lower(), value.strip()
+    if scheme == "bearer":
+        return value, False
+    if scheme == "basic":
+        try:
+            return base64.b64decode(value, validate=True).decode("utf-8").partition(":")[2], True
+        except (binascii.Error, UnicodeDecodeError):
+            return "", True
+    return "", False
+
+
+def admin_check(request: Request, mutating: bool = False):
+    """None when the request may use the admin routes, otherwise the response to send instead.
+    With no SCRIPT_ADMIN_TOKEN set the routes don't exist (404). A browser's sign-in is only
+    trusted for changes when the page's own script sent X-Admin-Request, which another
+    website's form or request can't add."""
+    if not admin_enabled():
+        raise StarletteHTTPException(status_code=404)
+    key = f"admin:{request.client.host if request.client else 'unknown'}"
+    if rate_limited(key, ADMIN_FAILS_PER_MIN, record=False):
+        return PlainTextResponse("Too many wrong passwords. Wait a minute.", status_code=429,
+                                 headers={"Retry-After": "60", **NO_STORE})
+    given, from_browser = admin_password(request)
+    signin = {"WWW-Authenticate": 'Basic realm="Hosted scripts", charset="UTF-8"', **NO_STORE}
+    if not given:
+        return PlainTextResponse("Sign in with the admin password (any user name).",
+                                 status_code=401, headers=signin)
+    if not hmac.compare_digest(given.encode(), SCRIPT_ADMIN_TOKEN.encode()):
+        rate_limited(key, ADMIN_FAILS_PER_MIN)      # count this wrong password
+        log.warning("Wrong admin password from %s", key.split(":", 1)[1])
+        return PlainTextResponse("Wrong password.", status_code=401, headers=signin)
+    if mutating and from_browser and request.headers.get("x-admin-request") != "1":
+        return PlainTextResponse("Refused.", status_code=403, headers=NO_STORE)
+    return None
+
+
+def admin_error(message_text: str, status: int) -> JSONResponse:
+    return JSONResponse({"error": message_text}, status_code=status, headers=NO_STORE)
+
+
+@app.get("/l/{token}")
+async def script_file(request: Request, token: str):
+    """The hosted script as plain text, for loadstring(game:HttpGet(...))()."""
+    ip = request.client.host if request.client else "unknown"
+    if rate_limited(f"l:{ip}", SCRIPT_FETCHES_PER_MIN):
+        return PlainTextResponse("Too many requests. Wait a minute.", status_code=429,
+                                 headers={"Retry-After": "60", **NO_STORE})
+    body = await run_in_threadpool(serve_script, token) if SCRIPT_TOKEN_RE.fullmatch(token) else None
+    if body is None:
+        return PlainTextResponse("Not found", status_code=404, headers=NO_STORE)
+    return Response(content=body, media_type="text/plain", headers=NO_STORE)
+
+
+@app.get("/admin")
+async def admin_page(request: Request):
+    denied = admin_check(request)
+    if denied:
+        return denied
+    base = site_base(request)
+    scripts = [{"name": name, "line": script_loadstring(base, token), "size": size_text(size),
+                "sha": sha[:12], "hits": hits, "updated": when_text(updated),
+                "last": when_text(last) or "never"}
+               for name, token, size, sha, hits, updated, last in await run_in_threadpool(list_scripts)]
+    resp = render(request, "admin.html", scripts=scripts)
+    resp.headers.update(NO_STORE)
+    return resp
+
+
+@app.put("/admin/scripts/{name}")
+async def admin_upload(request: Request, name: str):
+    """Save the request body as the script `name` (a new name makes a new link)."""
+    denied = admin_check(request, mutating=True)
+    if denied:
+        return denied
+    if not SCRIPT_NAME_RE.fullmatch(name):
+        return admin_error("The name can use a-z, 0-9, - and _, up to 32 characters.", 400)
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    raw = None if declared > SCRIPT_MAX_BYTES else await read_capped(request, SCRIPT_MAX_BYTES)
+    if raw is None:
+        return admin_error(f"That file is over {SCRIPT_MAX_BYTES // (1024 * 1024)} MB.", 413)
+    try:
+        body = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return admin_error("That file isn't UTF-8 text.", 400)
+    if not body.strip() or "\x00" in body:
+        return admin_error("That file is empty or isn't text.", 400)
+    sha = hashlib.sha256(raw).hexdigest()
+    token, created = await run_in_threadpool(save_script, name, body, len(raw), sha)
+    log.info("Hosted script %s %s: %d bytes, sha256 %s", name, "added" if created else "replaced",
+             len(raw), sha[:12])
+    return JSONResponse({"name": name, "created": created, "bytes": len(raw), "sha256": sha,
+                         "loadstring": script_loadstring(site_base(request), token)}, headers=NO_STORE)
+
+
+@app.post("/admin/scripts/{name}/rotate")
+async def admin_rotate(request: Request, name: str):
+    """Give the script a new link; the old link stops working at once."""
+    denied = admin_check(request, mutating=True)
+    if denied:
+        return denied
+    token = await run_in_threadpool(rotate_script, name) if SCRIPT_NAME_RE.fullmatch(name) else None
+    if token is None:
+        return admin_error("No script has that name.", 404)
+    log.info("Hosted script %s got a new link", name)
+    return JSONResponse({"name": name, "loadstring": script_loadstring(site_base(request), token)},
+                        headers=NO_STORE)
+
+
+@app.delete("/admin/scripts/{name}")
+async def admin_delete(request: Request, name: str):
+    denied = admin_check(request, mutating=True)
+    if denied:
+        return denied
+    if not (SCRIPT_NAME_RE.fullmatch(name) and await run_in_threadpool(delete_script, name)):
+        return admin_error("No script has that name.", 404)
+    log.info("Hosted script %s removed", name)
+    return JSONResponse({"name": name, "removed": True}, headers=NO_STORE)
+
+
 @app.exception_handler(StarletteHTTPException)
 async def http_error(request: Request, exc: StarletteHTTPException):
     """A visitor who lands on a wrong address or a link that needs the Buy button gets a
-    page from the shop, not a bare JSON error. Files under /static and Stripe's webhook keep
-    the plain response, and every other error is handled as before."""
+    page from the shop, not a bare JSON error. Files under /static, Stripe's webhook and hosted
+    script links (/l/) keep the plain response, and every other error is handled as before."""
     path = request.url.path
-    if exc.status_code in (404, 405) and not path.startswith(("/static/", "/stripe/")):
+    if exc.status_code in (404, 405) and not path.startswith(("/static/", "/stripe/", "/l/")):
         if exc.status_code == 404:
             resp = message(request, "Page not found",
                            "That page doesn't exist. Head back to the shop to choose a key.", 404)
