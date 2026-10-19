@@ -5,6 +5,7 @@ stubs.py); nothing here touches the real Stripe, Luarmor, Railway or database.
 Run from the shop folder:  python3 -m unittest discover -s tests -v
 """
 import asyncio
+import hashlib
 import os
 import sys
 import unittest
@@ -99,6 +100,24 @@ class LoadingTests(StockCase):
         text = "\n".join(cm.output)
         for k in keys + [typo]:
             self.assertNotIn(k, text)
+
+    def test_the_log_shows_a_fingerprint_of_each_pile_in_any_order_but_never_a_key(self):
+        day = [stock_key("day", n) for n in (1, 2, 3)]
+        expect = hashlib.sha256("\n".join(sorted(day)).encode()).hexdigest()[:10]
+        with self.logged("INFO") as cm:
+            self.stock(day=day)
+        text = "\n".join(cm.output)
+        self.assertIn(f"LUARMOR_STOCK_DAY: 3 keys, fingerprint {expect}", text)
+        self.assertIn("LUARMOR_STOCK_WEEK: 0 keys", text)
+        self.assertIn("LUARMOR_STOCK_MONTH: 0 keys", text)
+        for k in day:
+            self.assertNotIn(k, text)
+        with self.logged("INFO") as cm:
+            self.stock(day=day[::-1])                   # same keys, other order
+        self.assertIn(f"LUARMOR_STOCK_DAY: 3 keys, fingerprint {expect}", "\n".join(cm.output))
+        with self.logged("INFO") as cm:
+            self.stock(day=day[:2])                     # one key fewer
+        self.assertNotIn(expect, "\n".join(cm.output))
 
     def test_the_api_switch_reads_the_usual_ways_of_saying_yes(self):
         for value, expected in (("1", True), ("true", True), ("TRUE", True), ("Yes", True), ("on", True),

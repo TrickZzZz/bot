@@ -335,11 +335,20 @@ def read_stock_env() -> dict:
     return wanted
 
 
+def stock_fingerprint(keys) -> str:
+    """A short fingerprint of a set of keys, whatever order they are in. The log shows it so the
+    owner can check that exactly the intended keys were loaded without any key being in the log."""
+    return hashlib.sha256("\n".join(sorted(keys)).encode()).hexdigest()[:10]
+
+
 def sync_stock() -> dict:
     """Bring luarmor_stock in line with the variables: add new keys, move an unsold key whose
     variable changed, drop an unsold key that was removed. A sold key is never touched.
     Returns the counts of what changed."""
     wanted = read_stock_env()
+    for plan_id, var in STOCK_VARS.items():
+        keys = [key for key, plan in wanted.items() if plan == plan_id]
+        log.info("%s: %d keys, fingerprint %s", var, len(keys), stock_fingerprint(keys))
     done = {"added": 0, "moved": 0, "dropped": 0}
     now = utcnow()
     with engine.begin() as conn:
