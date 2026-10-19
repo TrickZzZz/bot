@@ -5,8 +5,10 @@ Stripe, Luarmor, Railway or database.
 Run from the shop folder:  python3 -m unittest discover -s tests -v
 """
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import sys
 import unittest
 from datetime import timedelta
@@ -25,6 +27,12 @@ from app.luarmor import Luarmor, LuarmorError  # noqa: E402
 from test_luarmor import FakeLuarmor as HttpFakeLuarmor  # noqa: E402
 
 SID = "cs_test_a1B2c3D4e5F6g7H8"
+
+
+def stock_key(plan, n):
+    """A made-up 32-character Luarmor key that says which pile it belongs to."""
+    prefix = f"{plan.capitalize()}Key"
+    return prefix + str(n).zfill(32 - len(prefix))
 PI = "pi_test_123"
 
 
@@ -66,11 +74,14 @@ class ShopCase(unittest.TestCase):
     def setUp(self):
         with main.engine.begin() as conn:
             conn.execute("DELETE FROM license_keys")
+            conn.execute("DELETE FROM luarmor_stock")
         main._hits.clear()
         self.luarmor = FakeLuarmor()
         self.patch(main, "luarmor", self.luarmor)
         self.patch(main, "STRIPE_SECRET_KEY", "sk_test_x")
         self.patch(main, "STRIPE_WEBHOOK_SECRET", "whsec_x")
+        # Most tests here are about the Luarmor API path, so it is on. StockCase turns it off.
+        self.patch(main, "LUARMOR_USE_API", True)
 
     def patch(self, target, name, value):
         p = mock.patch.object(target, name, value)
@@ -79,6 +90,29 @@ class ShopCase(unittest.TestCase):
 
     def stripe_stub(self, name, fn):
         self.patch(stripe.checkout.Session, name, staticmethod(fn))
+
+    def stock(self, **piles):
+        """Load keys as the LUARMOR_STOCK_* variables would: stock(day=[...], week=[...]).
+        Plans left out get an empty variable. Returns what the loading changed."""
+        env = {var: "\n".join(piles.get(plan_id, [])) for plan_id, var in main.STOCK_VARS.items()}
+        p = mock.patch.dict(os.environ, env)
+        p.start()
+        self.addCleanup(p.stop)
+        return main.sync_stock()
+
+    @contextlib.contextmanager
+    def logged(self, level="INFO"):
+        """Capture the shop's log lines (the suite normally silences logging)."""
+        logging.disable(logging.NOTSET)
+        try:
+            with self.assertLogs("shop", level) as cm:
+                yield cm
+        finally:
+            logging.disable(logging.CRITICAL)
+
+    def stock_rows(self):
+        with main.engine.begin() as conn:
+            return [dict(r) for r in conn.execute("SELECT * FROM luarmor_stock ORDER BY id").fetchall()]
 
     # ── database helpers ───────────────────────────────────────────────────
     def rows(self):
@@ -176,9 +210,9 @@ class FulfilTests(ShopCase):
         self.assertEqual([r["key"] for r in self.rows()], [key])
         self.assertEqual(len(self.luarmor.created), 1)
 
-    def test_unconfigured_luarmor_raises_and_leaves_nothing(self):
+    def test_unconfigured_luarmor_with_no_stock_is_out_of_stock_and_leaves_nothing(self):
         self.patch(main, "luarmor", Luarmor("", ""))
-        with self.assertRaises(LuarmorError):
+        with self.assertRaises(main.OutOfStock):
             main.fulfil(paid_session())
         self.assertEqual(self.rows(), [])
 
@@ -315,20 +349,30 @@ class CheckoutTests(ShopCase):
         self.stripe_stub("create", boom)
         self.assertEqual(self.checkout().status_code, 502)
 
-    def test_shop_page_shows_the_off_notice_until_luarmor_is_set_up(self):
-        off = main.index(stubs.make_request("/"))
-        self.assertEqual(off.status_code, 200)
-        self.assertNotIn("switched on yet", off.body.decode())     # Stripe and Luarmor are set in setUp
-        self.assertNotIn("disabled", off.body.decode())
-        self.patch(main, "luarmor", Luarmor("", ""))
+    def test_shop_page_is_locked_until_stripe_is_set_up(self):
+        on = main.index(stubs.make_request("/"))
+        self.assertEqual(on.status_code, 200)
+        self.assertNotIn("switched on yet", on.body.decode())      # Stripe and Luarmor are set in setUp
+        self.assertNotIn("sold out", on.body.decode().lower())
+        self.assertNotIn("disabled", on.body.decode())
+        self.patch(main, "STRIPE_SECRET_KEY", "")
         html = main.index(stubs.make_request("/")).body.decode()
         self.assertIn("switched on yet", html)
         self.assertIn("disabled", html)
 
+    def test_shop_page_says_sold_out_when_no_key_can_be_issued(self):
+        self.patch(main, "luarmor", Luarmor("", ""))               # API unusable, and no stock
+        html = main.index(stubs.make_request("/")).body.decode()
+        self.assertIn("sold out", html.lower())
+        self.assertNotIn("switched on yet", html)
+        self.assertIn("disabled", html)
+
     def test_health_reports_luarmor(self):
-        self.assertEqual(main.health(), {"ok": True, "checkout": True, "webhook": True, "luarmor": True})
+        self.assertEqual(main.health(), {"ok": True, "checkout": True, "webhook": True, "luarmor": True,
+                                         "api": True, "stock": []})
         self.patch(main, "luarmor", Luarmor("", ""))
-        self.assertEqual(main.health(), {"ok": True, "checkout": False, "webhook": True, "luarmor": False})
+        self.assertEqual(main.health(), {"ok": True, "checkout": False, "webhook": True, "luarmor": False,
+                                         "api": False, "stock": []})
 
     def test_no_page_still_tells_buyers_to_use_claim_key(self):
         pages = [main.index(stubs.make_request("/")).body.decode(),

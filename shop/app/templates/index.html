@@ -97,8 +97,12 @@
     <p class="picker-note">Your time starts the first time you redeem the key or run the script, not when you pay.</p>
   </div>
   </form>
-  {% if not checkout_ready %}
+  {% if not stripe_ready %}
   <p class="notice">Checkout isn't switched on yet. Check back soon.</p>
+  {% elif not checkout_ready %}
+  <p class="notice">Every key is sold out right now. Check back soon.</p>
+  {% elif sold_out %}
+  <p class="notice">Sold out for now: {{ sold_out | join(", ") }}.</p>
   {% endif %}
 </section>
 

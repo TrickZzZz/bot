@@ -256,7 +256,8 @@ def install():
         return _main, sys.modules["stripe"]
     os.environ.setdefault("DATABASE_URL", "sqlite://")
     for var in ("STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET", "LUARMOR_API_KEY",
-                "LUARMOR_PROJECT_ID", "LUARMOR_API_URL"):
+                "LUARMOR_PROJECT_ID", "LUARMOR_API_URL", "LUARMOR_USE_API",
+                "LUARMOR_STOCK_DAY", "LUARMOR_STOCK_WEEK", "LUARMOR_STOCK_MONTH"):
         os.environ.pop(var, None)
     sqlite3.register_adapter(datetime, _adapt_datetime)
     sqlite3.register_converter("TIMESTAMP", lambda b: datetime.fromisoformat(b.decode()))

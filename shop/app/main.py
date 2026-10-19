@@ -1,26 +1,43 @@
 """Tracker Access shop.
 
 Stripe Checkout -> Luarmor key -> redeemed with the Redeem Key button of the Luarmor panel
-in Discord. The key is made on Luarmor (app/luarmor.py) the moment a payment clears, with
-a length of 1, 7 or 30 days that starts counting when the buyer first redeems or runs it.
-Shares the Postgres database (table: license_keys) with the Discord bot.
+in Discord. A paid order gets a key of 1, 7 or 30 days that starts counting when the buyer
+first redeems or runs it. The key comes from one of two places:
+  * Stock: keys made by hand in the Luarmor dashboard and listed in the LUARMOR_STOCK_*
+    variables. Each paid order gets the next unsold key of its plan. No Luarmor API call is
+    needed, so no whitelisted IP either. A plan with no unsold keys is shown as sold out.
+  * The Luarmor API (app/luarmor.py), only when LUARMOR_USE_API is on: makes a key when a
+    plan has no stock left, and blacklists the key of a disputed payment.
+Shares the Postgres database (table: license_keys) with the Discord bot. Stock is kept in
+its own table, luarmor_stock.
 
 Environment:
   DATABASE_URL           required, same database the bot uses
   STRIPE_SECRET_KEY      sk_test_... / sk_live_... (checkout stays off until set)
   STRIPE_WEBHOOK_SECRET  whsec_... for POST /stripe/webhook
-  LUARMOR_API_KEY        Luarmor API key (checkout stays off until set)
-  LUARMOR_PROJECT_ID     id of the Luarmor project the keys belong to (checkout stays off until set)
+  LUARMOR_STOCK_DAY      keys for the 1-day plan, separated by new lines, spaces or commas
+  LUARMOR_STOCK_WEEK     keys for the 7-day plan (same format)
+  LUARMOR_STOCK_MONTH    keys for the 30-day plan (same format)
+  LUARMOR_USE_API        1 to let the shop call the Luarmor API (default off, see below)
+  LUARMOR_API_KEY        Luarmor API key (used only when LUARMOR_USE_API is on)
+  LUARMOR_PROJECT_ID     id of the Luarmor project (used only when LUARMOR_USE_API is on)
   LUARMOR_API_URL        default https://api.luarmor.net/v3 (only change it for testing)
   SITE_URL               public base URL, e.g. https://keys.example.com (optional)
   SUPPORT_URL            Discord invite shown on the site (optional)
   LOG_LEVEL              default INFO
 
-Luarmor only accepts API calls from IP addresses whitelisted in its dashboard, so the shop
-service needs a static outbound IP (Railway: service settings, Networking) that is added there.
+Stock keys must be made in the Luarmor dashboard to last N days from first use, not until a
+fixed date, or the time would run out before the buyer starts. The variables are read when the
+shop starts: new keys are added, a key moved to another variable changes plan if it is unsold,
+an unsold key removed from the variables is dropped, and a sold key is never touched.
+
+Luarmor only accepts API calls from IP addresses whitelisted in its dashboard, so turn
+LUARMOR_USE_API on only once the shop service has a static outbound IP (Railway: service
+settings, Networking) that is added there. While it is off, a disputed payment's stock key has
+to be blacklisted by hand: the shop logs a "BLACKLIST BY HAND" line with the key.
 
 For Stripe, send the checkout.session.completed and charge.dispute.created events to
-/stripe/webhook. A disputed payment blacklists its key on Luarmor and marks it revoked here.
+/stripe/webhook. A disputed payment revokes its key here and blacklists it on Luarmor.
 """
 import hashlib
 import json
@@ -48,7 +65,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from .luarmor import DEFAULT_API_URL, Luarmor, LuarmorError
+from .luarmor import DEFAULT_API_URL, KEY_RE, Luarmor, LuarmorError
 
 # stdout, not the default stderr: Railway labels everything on stderr as an error, which
 # made every normal "Issued a key" line look like a failure in the log view.
@@ -67,6 +84,11 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def flag(name: str) -> bool:
+    """An on/off variable: 1, true, yes or on (any letter case) is on; anything else, or unset, is off."""
+    return _env(name).lower() in ("1", "true", "yes", "on")
+
+
 DATABASE_URL = _env("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL environment variable is required.")
@@ -81,13 +103,24 @@ LUARMOR_API_KEY       = _env("LUARMOR_API_KEY")
 LUARMOR_PROJECT_ID    = _env("LUARMOR_PROJECT_ID")
 LUARMOR_API_URL       = _env("LUARMOR_API_URL", DEFAULT_API_URL)
 
+# Off unless asked for: Luarmor refuses API calls from an address that isn't whitelisted, and a
+# shop that can't whitelist one must not take payment for a key it would then fail to make.
+LUARMOR_USE_API       = flag("LUARMOR_USE_API")
+
 luarmor = Luarmor(LUARMOR_API_KEY, LUARMOR_PROJECT_ID, LUARMOR_API_URL)
+
+STOCK_VARS = {"day": "LUARMOR_STOCK_DAY", "week": "LUARMOR_STOCK_WEEK", "month": "LUARMOR_STOCK_MONTH"}
+
+
+def api_enabled() -> bool:
+    """True when the shop may call the Luarmor API: switched on AND the API key and project id are set."""
+    return LUARMOR_USE_API and luarmor.configured
 
 
 def checkout_ready() -> bool:
-    """Checkout only opens when Stripe can take the payment AND Luarmor can make the key,
-    so nobody pays for a key the shop has no way to issue."""
-    return bool(STRIPE_SECRET_KEY) and luarmor.configured
+    """Checkout only opens when Stripe can take the payment AND at least one key length
+    can be issued, so nobody pays for a key the shop has no way to hand over."""
+    return bool(STRIPE_SECRET_KEY) and bool(available_plans())
 
 # Prices are in pence (Stripe's minimum GBP charge is 30p). Must match the
 # plan names the bot understands ("day", "week", "month"), and "days" must match
@@ -143,6 +176,18 @@ class LicenseKey(Base):
     luarmor_banned_at  = Column(DateTime(timezone=True), nullable=True)
 
 
+class LuarmorStock(Base):
+    """Keys made by hand in the Luarmor dashboard, loaded from the LUARMOR_STOCK_* variables.
+    A key with no order_ref is unsold; the unique order_ref is the Stripe session that bought it."""
+    __tablename__ = "luarmor_stock"
+    id          = Column(Integer, primary_key=True)
+    key         = Column(String(64), unique=True, nullable=False)
+    plan        = Column(String(10), nullable=False)
+    added_at    = Column(DateTime(timezone=True), default=utcnow)
+    order_ref   = Column(String(200), unique=True, nullable=True)
+    assigned_at = Column(DateTime(timezone=True), nullable=True)
+
+
 # Columns the shop owns on license_keys (the bot's own copy of the table doesn't map them).
 SHOP_COLUMNS = {
     "buyer_email":  "VARCHAR(320)",
@@ -168,6 +213,11 @@ def init_db():
                     f"ALTER TABLE license_keys ADD COLUMN IF NOT EXISTS {name} {sql_type}"))
         except Exception as e:  # SQLite has no IF NOT EXISTS for columns; fine for local runs
             log.info("%s column check skipped: %s", name, e)
+    try:
+        sync_stock()
+    except Exception:
+        # Keys loaded on an earlier start stay in the table, so people who already paid still get theirs.
+        log.exception("Loading the key stock from the LUARMOR_STOCK_* variables failed")
 
 
 CURRENCY_SYMBOLS = {"usd": "$", "gbp": "£", "eur": "€"}
@@ -226,11 +276,136 @@ def order_details(row):
             "currency": (cur or CURRENCY).upper()}
 
 
-# ── Issuing a Luarmor key ──────────────────────────────────────────────────
+# ── Key stock ──────────────────────────────────────────────────────────────
+# Keys made by hand in the Luarmor dashboard are listed in the LUARMOR_STOCK_* variables. At
+# start-up they are copied into luarmor_stock, and a paid order takes the oldest unsold key of
+# its plan. The unique order_ref on a stock row is the Stripe session that bought it, so asking
+# again for the same order returns the same key and one key can never be sold twice.
+# The SQL sits in constants so the tests can run these exact statements on a scratch database.
+STOCK_ADD_SQL       = ('INSERT INTO luarmor_stock ("key", plan, added_at) VALUES (:key, :plan, :now) '
+                       'ON CONFLICT ("key") DO NOTHING')
+STOCK_REPLAN_SQL    = ('UPDATE luarmor_stock SET plan = :plan '
+                       'WHERE "key" = :key AND order_ref IS NULL AND plan <> :plan')
+STOCK_UNSOLD_SQL    = 'SELECT "key" FROM luarmor_stock WHERE order_ref IS NULL'
+STOCK_DROP_SQL      = 'DELETE FROM luarmor_stock WHERE "key" = :key AND order_ref IS NULL'
+STOCK_COUNTS_SQL    = 'SELECT plan, COUNT(*) FROM luarmor_stock WHERE order_ref IS NULL GROUP BY plan'
+STOCK_FOR_ORDER_SQL = 'SELECT "key" FROM luarmor_stock WHERE order_ref = :sid'
+STOCK_PICK_SQL      = ('SELECT id, "key" FROM luarmor_stock WHERE plan = :plan AND order_ref IS NULL '
+                       'ORDER BY id LIMIT 1')
+# The "order_ref IS NULL" is what makes two buyers racing for the same key safe: whoever commits
+# second updates no row and goes round again for the next key.
+STOCK_CLAIM_SQL     = ('UPDATE luarmor_stock SET order_ref = :sid, assigned_at = :now '
+                       'WHERE id = :id AND order_ref IS NULL')
+STOCK_TAKE_TRIES    = 8
+
+
+class OutOfStock(Exception):
+    """A paid order has no key to get: its plan has no unsold stock and the Luarmor API is off."""
+
+    def __init__(self, plan_id: str):
+        super().__init__(plan_id)
+        self.plan = plan_id
+
+
+def parse_stock(raw: str) -> list:
+    """The items in a LUARMOR_STOCK_* value: separated by white space, commas or semicolons,
+    with any quote marks pasted around a key ignored."""
+    items = (item.strip("\"'") for item in re.split(r"[\s,;]+", raw or ""))
+    return [item for item in items if item]
+
+
+def read_stock_env() -> dict:
+    """The stock the variables describe, as {key: plan}. An item that isn't shaped like a Luarmor
+    key, or a key listed under two lengths, is left out and reported in the log (never with the
+    key itself, because the log is not a safe place for keys)."""
+    wanted, clashes = {}, set()
+    for plan_id, var in STOCK_VARS.items():
+        for number, item in enumerate(parse_stock(_env(var)), 1):
+            if not KEY_RE.match(item):
+                log.error("%s: item %d is not a Luarmor key (%d characters) and was skipped",
+                          var, number, len(item))
+            elif wanted.get(item, plan_id) != plan_id:
+                clashes.add(item)
+                log.error("%s: item %d is also listed under another key length, so it was skipped "
+                          "everywhere (a key can only be one length)", var, number)
+            else:
+                wanted[item] = plan_id
+    for item in clashes:
+        wanted.pop(item, None)
+    return wanted
+
+
+def sync_stock() -> dict:
+    """Bring luarmor_stock in line with the variables: add new keys, move an unsold key whose
+    variable changed, drop an unsold key that was removed. A sold key is never touched.
+    Returns the counts of what changed."""
+    wanted = read_stock_env()
+    done = {"added": 0, "moved": 0, "dropped": 0}
+    now = utcnow()
+    with engine.begin() as conn:
+        for key, plan_id in wanted.items():
+            if conn.execute(text(STOCK_ADD_SQL), {"key": key, "plan": plan_id, "now": now}).rowcount == 1:
+                done["added"] += 1
+            elif conn.execute(text(STOCK_REPLAN_SQL), {"key": key, "plan": plan_id}).rowcount == 1:
+                done["moved"] += 1
+        for row in conn.execute(text(STOCK_UNSOLD_SQL)).fetchall():
+            if row[0] not in wanted:
+                conn.execute(text(STOCK_DROP_SQL), {"key": row[0]})
+                done["dropped"] += 1
+    log.info("Key stock loaded: %d added, %d moved to another length, %d removed",
+             done["added"], done["moved"], done["dropped"])
+    return done
+
+
+def stock_counts() -> dict:
+    """Unsold keys per plan, e.g. {"day": 20, "week": 3, "month": 0}."""
+    counts = {plan_id: 0 for plan_id in PLANS}
+    with engine.begin() as conn:
+        for row in conn.execute(text(STOCK_COUNTS_SQL)).fetchall():
+            if row[0] in counts:
+                counts[row[0]] = int(row[1])
+    return counts
+
+
+def plans_in_stock() -> set:
+    """Key lengths with at least one unsold stock key. Empty (and logged) if the database can't
+    be read, so a broken database shows 'sold out' instead of taking payments."""
+    try:
+        return {plan_id for plan_id, left in stock_counts().items() if left > 0}
+    except Exception:
+        log.exception("Could not read the key stock; treating every key length as sold out")
+        return set()
+
+
+def available_plans() -> set:
+    """Key lengths that can be bought right now: every length when the Luarmor API can make keys
+    on demand, otherwise the lengths that still have stock."""
+    return set(PLANS) if api_enabled() else plans_in_stock()
+
+
+def take_stock_key(sid: str, plan_id: str):
+    """The stock key that belongs to this order: the one it already took (so asking again gives
+    the same key), otherwise the oldest unsold key of the plan. None when the plan has none left."""
+    for _ in range(STOCK_TAKE_TRIES):
+        with engine.begin() as conn:
+            mine = conn.execute(text(STOCK_FOR_ORDER_SQL), {"sid": sid}).first()
+            if mine is not None:
+                return mine[0]
+            pick = conn.execute(text(STOCK_PICK_SQL), {"plan": plan_id}).first()
+            if pick is None:
+                return None
+            if conn.execute(text(STOCK_CLAIM_SQL),
+                            {"sid": sid, "now": utcnow(), "id": pick[0]}).rowcount == 1:
+                return pick[1]
+        # Another buyer took that key between the two statements; look again for the next one.
+    return None
+
+
+# ── Issuing a key ──────────────────────────────────────────────────────────
 # A paid order gets its row in license_keys first, holding a placeholder key, and only then is
-# Luarmor asked for the real key. The unique order_ref means exactly one request (the webhook
-# or the success page, whichever is first) wins that insert and makes the Luarmor key, so a
-# buyer can never end up with two keys or an unsold one left behind on Luarmor.
+# the real key fetched (a stock key, or a new one from Luarmor). The unique order_ref means
+# exactly one request (the webhook or the success page, whichever is first) wins that insert and
+# fetches the key, so a buyer can never end up with two keys or an unsold one left behind on Luarmor.
 # The SQL sits in constants so the tests can run these exact statements on a scratch database.
 PENDING_PREFIX     = "PENDING-"   # placeholder in license_keys.key while Luarmor is being asked
 LEGACY_PREFIX      = "TRK-"       # keys the shop made itself before Luarmor (redeemed with /claim_key)
@@ -304,13 +479,27 @@ def discard_luarmor_key(key: str, sid: str) -> None:
                   "Delete this key by hand in the Luarmor dashboard: %s", sid, e, key)
 
 
+def obtain_key(sid: str, plan_id: str):
+    """The key for a paid order: its stock key if the plan has one, else a new key from the
+    Luarmor API when that is switched on. Returns (key, made_just_now), where made_just_now is
+    True for a key the API made for this call (the only kind that has to be deleted again if the
+    order can't be completed). Raises OutOfStock, or LuarmorError when the API is tried and fails."""
+    key = take_stock_key(sid, plan_id)
+    if key is not None:
+        return key, False
+    if not api_enabled():
+        raise OutOfStock(plan_id)
+    return luarmor.create_key(PLANS[plan_id]["days"], f"shop-{plan_id}-{sid[-10:]}"), True
+
+
 def fulfil(order: dict):
-    """Create (or return) the Luarmor key for a paid Checkout Session. Safe to call repeatedly
-    and from several places at once.
+    """Give a paid Checkout Session its key (or return the one it already has). Safe to call
+    repeatedly and from several places at once.
 
     Returns the key, or None for an order that isn't paid or has no valid plan. Raises
-    KeyPending when another request is making the key right now, and LuarmorError when Luarmor
-    can't make it; in both cases nothing is left half done, so calling again is safe."""
+    KeyPending when another request is getting the key right now, OutOfStock when the plan has
+    no stock and the Luarmor API is off, and LuarmorError when the API can't make the key; in
+    all three cases nothing is left half done, so calling again is safe."""
     if order.get("payment_status") != "paid":
         return None
     sid     = order.get("id")
@@ -355,24 +544,28 @@ def fulfil(order: dict):
 
     row_id, placeholder = mine
     try:
-        key = luarmor.create_key(PLANS[plan_id]["days"], f"shop-{plan_id}-{sid[-10:]}")
+        key, made_now = obtain_key(sid, plan_id)
     except Exception:
         release_order(row_id, placeholder)
         raise
+    # A stock key stays assigned to this order (its order_ref) whatever happens next, so the next
+    # attempt gets the same key back. A key the API just made has no such memory: it is deleted.
     try:
         with engine.begin() as conn:
             saved = conn.execute(text(FINISH_ORDER_SQL), {"key": key, "id": row_id,
                                                           "pending": placeholder}).rowcount == 1
     except Exception:
         release_order(row_id, placeholder)
-        discard_luarmor_key(key, sid)
+        if made_now:
+            discard_luarmor_key(key, sid)
         raise
     if not saved:
-        # Luarmor was slow enough that another request took this order over. It owns the order now.
-        log.error("Order %s: lost the placeholder while Luarmor was answering", sid)
-        discard_luarmor_key(key, sid)
+        # Getting the key was slow enough that another request took this order over. It owns the order now.
+        log.error("Order %s: lost the placeholder while the key was being fetched", sid)
+        if made_now:
+            discard_luarmor_key(key, sid)
         raise KeyPending(sid)
-    log.info("Issued a %s Luarmor key for order %s", plan_id, sid)
+    log.info("Issued a %s key for order %s (%s)", plan_id, sid, "Luarmor API" if made_now else "stock")
     return key
 
 
@@ -417,9 +610,20 @@ async def lifespan(_app: FastAPI):
         log.warning("STRIPE_SECRET_KEY is not set — checkout is disabled")
     if not STRIPE_WEBHOOK_SECRET:
         log.warning("STRIPE_WEBHOOK_SECRET is not set — webhook is disabled")
-    if not luarmor.configured:
-        log.warning("LUARMOR_API_KEY / LUARMOR_PROJECT_ID are not (both) set, or the project id "
-                    "is malformed — checkout is disabled because no key could be issued")
+    if LUARMOR_USE_API and not luarmor.configured:
+        log.warning("LUARMOR_USE_API is on but LUARMOR_API_KEY / LUARMOR_PROJECT_ID are not (both) set, "
+                    "or the project id is malformed — the Luarmor API will not be used")
+    try:
+        counts = stock_counts()
+    except Exception:
+        log.exception("Could not read the key stock at start-up")
+        counts = {}
+    log.info("Unsold stock keys: %s. Luarmor API: %s",
+             ", ".join(f"{plan_id} {left}" for plan_id, left in counts.items()) or "unknown",
+             "on" if api_enabled() else "off")
+    if not api_enabled() and not any(counts.values()):
+        log.warning("No stock keys and the Luarmor API is off — nothing can be sold. "
+                    "Set %s and redeploy.", " / ".join(STOCK_VARS.values()))
     yield
 
 
@@ -506,15 +710,20 @@ async def read_form(request: Request, limit: int = 4096) -> dict:
 def index(request: Request):
     # The plan that costs least per day gets the "Best value" tag.
     best = min(PLANS, key=lambda pid: PLANS[pid]["pence"] / PLANS[pid]["days"])
+    # Only lengths that can be bought go in the dropdown; with none left they all show, locked.
+    for_sale = available_plans()
+    shown = [pid for pid in PLANS if pid in for_sale] or list(PLANS)
     plans = [{
-        "id": pid, "name": p["name"], "label": p["label"], "days": p["days"],
-        "price": price_text(p["pence"]),
-        "per_day": price_text(round(p["pence"] / p["days"])),
+        "id": pid, "name": PLANS[pid]["name"], "label": PLANS[pid]["label"], "days": PLANS[pid]["days"],
+        "price": price_text(PLANS[pid]["pence"]),
+        "per_day": price_text(round(PLANS[pid]["pence"] / PLANS[pid]["days"])),
         "best": pid == best and len(PLANS) > 1,
-    } for pid, p in PLANS.items()]
-    default_plan = DEFAULT_PLAN if DEFAULT_PLAN in PLANS else next(iter(PLANS))
+    } for pid in shown]
+    default_plan = DEFAULT_PLAN if DEFAULT_PLAN in shown else shown[0]
+    sold_out = [PLANS[pid]["name"] for pid in PLANS if pid not in for_sale]
     return render(request, "index.html", plans=plans, default_plan=default_plan,
-                  checkout_ready=checkout_ready())
+                  checkout_ready=bool(STRIPE_SECRET_KEY) and bool(for_sale),
+                  stripe_ready=bool(STRIPE_SECRET_KEY), sold_out=sold_out)
 
 
 @app.get("/terms")
@@ -541,9 +750,16 @@ async def start_checkout(request: Request, plan_id: str, form: dict | None = Non
     plan = PLANS.get(plan_id)
     if plan is None:
         return message(request, "Unknown key", "That key length doesn't exist. Pick one from the shop.", 404)
-    if not checkout_ready():
+    if not STRIPE_SECRET_KEY:
         return message(request, "Checkout isn't ready",
                        "Payments aren't switched on yet. Check back soon.", 503)
+    for_sale = await run_in_threadpool(available_plans)
+    if not for_sale:
+        return message(request, "Sold out",
+                       "Every key is sold out right now. Check back soon.", 503)
+    if plan_id not in for_sale:
+        return message(request, "Sold out",
+                       f"The {plan['name']} key is sold out right now. Pick another length or check back soon.", 409)
     if form is None:
         form = await read_form(request)
     if form.get("agree") != "yes":
@@ -611,6 +827,11 @@ async def stripe_webhook(request: Request):
             log.info("Order %s: its key is being made by another request; Stripe will ask again",
                      order.get("id"))
             return JSONResponse({"error": "key is being made"}, status_code=500)  # Stripe retries
+        except OutOfStock as e:
+            log.error("Order %s is paid but no %s key is left. Add keys to %s and redeploy; "
+                      "Stripe will retry and the buyer's page keeps checking",
+                      order.get("id"), e.plan, STOCK_VARS[e.plan])
+            return JSONResponse({"error": "out of stock"}, status_code=500)  # Stripe retries
         except LuarmorError as e:
             log.error("Order %s: Luarmor couldn't make the key (%s); Stripe will retry", order.get("id"), e)
             return JSONResponse({"error": "key service unavailable"}, status_code=500)  # Stripe retries
@@ -686,6 +907,15 @@ def success(request: Request, session_id: str = ""):
             return message(request, "Creating your key",
                            "Your payment went through and your key is being created. "
                            "This page checks again on its own.", 200, refresh=3)
+        except OutOfStock as e:
+            log.error("Order %s is paid but no %s key is left. Add keys to %s and redeploy",
+                      session_id, e.plan, STOCK_VARS[e.plan])
+            return message(request, "Restocking",
+                           "Your payment went through, but we have just run out of this key length. "
+                           "Your key will appear on this page as soon as we restock, and this page "
+                           "checks again on its own. If it is still here after a while, open a "
+                           f"support ticket in the Discord with this order ID: {session_id}",
+                           503, refresh=30)
         except LuarmorError as e:
             log.error("Order %s: Luarmor couldn't make the key (%s)", session_id, e)
             return message(request, "Creating your key",
@@ -721,8 +951,10 @@ def success(request: Request, session_id: str = ""):
 @app.get("/health")
 @app.head("/health")
 def health():
+    in_stock = plans_in_stock()
     return {"ok": True, "checkout": checkout_ready(), "webhook": bool(STRIPE_WEBHOOK_SECRET),
-            "luarmor": luarmor.configured}
+            "luarmor": luarmor.configured, "api": api_enabled(),
+            "stock": [plan_id for plan_id in PLANS if plan_id in in_stock]}
 
 
 @app.get("/robots.txt")
@@ -816,10 +1048,12 @@ KEY_BAN_STATE_SQL = 'SELECT "key", luarmor_banned_at FROM license_keys WHERE id 
 MARK_BANNED_SQL   = "UPDATE license_keys SET luarmor_banned_at = :now WHERE id = :id AND luarmor_banned_at IS NULL"
 
 
-def ban_on_luarmor(key_id: int) -> str:
+def ban_on_luarmor(key_id: int, dispute_id=None) -> str:
     """Blacklist a disputed order's key on Luarmor so it stops loading the script. Returns what
-    happened ("banned", "already banned", "not a Luarmor key", "no key"). Raises LuarmorError when
-    Luarmor can't be told; the dispute stays recorded and the next Stripe retry tries again."""
+    happened ("banned", "already banned", "not a Luarmor key", "blacklist by hand", "no key").
+    Raises LuarmorError when Luarmor can't be told; the dispute stays recorded and the next
+    Stripe retry tries again. With the Luarmor API off the shop can't do it at all, so it logs
+    the key for the owner to blacklist in the Luarmor dashboard and leaves the key unmarked."""
     with engine.begin() as conn:
         row = conn.execute(text(KEY_BAN_STATE_SQL), {"id": key_id}).first()
     if row is None:
@@ -829,6 +1063,10 @@ def ban_on_luarmor(key_id: int) -> str:
         return "already banned"
     if key.startswith((LEGACY_PREFIX, PENDING_PREFIX)):
         return "not a Luarmor key"      # the Discord bot ends access for the old keys
+    if not api_enabled():
+        log.error("BLACKLIST BY HAND: payment dispute %s on key %s. The Luarmor API is off, so "
+                  "blacklist this key in the Luarmor dashboard.", dispute_id or "?", key)
+        return "blacklist by hand"
     luarmor.blacklist_key(key, "Payment dispute")
     with engine.begin() as conn:
         conn.execute(text(MARK_BANNED_SQL), {"now": utcnow(), "id": key_id})
@@ -852,7 +1090,7 @@ def handle_dispute(dispute: dict) -> str:
         recorded = conn.execute(text(RECORD_DISPUTE_SQL),
                                 {"now": utcnow(), "id": key_id}).rowcount == 1
     # Also on a repeat event: if telling Luarmor failed last time, this is the retry that finishes it.
-    banned = ban_on_luarmor(key_id)
+    banned = ban_on_luarmor(key_id, did)
     if not recorded:
         log.info("Dispute %s repeated for key row %s (Luarmor: %s)", did, key_id, banned)
         return "duplicate"
