@@ -126,6 +126,7 @@ class ServingTests(ScriptCase):
         self.assertNotIn(b"<html", resp.body)
 
     def test_a_link_in_the_wrong_shape_never_reaches_the_database(self):
+        self.patch(main, "LINK_MISSES_PER_MIN", 100)         # the wrong-link limit has its own tests
         self.add()
         with mock.patch.object(main, "serve_script") as lookup:
             for bad in ("short", "x" * 65, "../etc/passwd", "a b c d e f g h i j k l", "%00" * 10, "é" * 20,
@@ -432,8 +433,9 @@ class SignInTests(ScriptCase):
         self.assertEqual(self.script_rows(), [])
 
     def test_a_password_of_24_characters_is_enough(self):
-        self.patch(main, "SCRIPT_ADMIN_TOKEN", "p" * 24)
-        self.assertEqual(self.page(auth=bearer("p" * 24)).status_code, 200)
+        value = "abcdefghijklmnopqrstuvwx"        # 24 different characters; test_hardening has the variety rule
+        self.patch(main, "SCRIPT_ADMIN_TOKEN", value)
+        self.assertEqual(self.page(auth=bearer(value)).status_code, 200)
 
     def test_no_password_gets_the_browsers_sign_in_box(self):
         calls = [("page", main.admin_page, "/admin", "GET", {}),

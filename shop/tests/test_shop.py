@@ -76,6 +76,7 @@ class ShopCase(unittest.TestCase):
             conn.execute("DELETE FROM license_keys")
             conn.execute("DELETE FROM luarmor_stock")
         main._hits.clear()
+        main._slow_hits.clear()
         self.luarmor = FakeLuarmor()
         self.patch(main, "luarmor", self.luarmor)
         self.patch(main, "STRIPE_SECRET_KEY", "sk_test_x")

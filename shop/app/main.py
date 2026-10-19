@@ -48,11 +48,17 @@ The token is random, so only people who were given the link can find it, but any
 link can run the script. "New link" on /admin changes the token and the old link stops working.
 A browser that opens the link is sent to the home page instead of being shown the script; the
 executor's HttpGet still gets it. That is a courtesy, not security: curl can send any header.
+Guessing is slowed per address (X-Real-IP, which Railway's edge sets, else the address uvicorn
+reports): wrong passwords on /admin, 10 a minute and 30 an hour, and wrong links, 5 a minute and
+20 an hour. SCRIPT_ADMIN_TOKEN needs 24+ characters, 10+ of them different, or /admin stays off
+and the start-up log says why. The link is hidden in uvicorn's access log, and the log notes the
+first admin sign-in from each address.
 """
 import base64
 import binascii
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -88,6 +94,39 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 log = logging.getLogger("shop")
+
+
+class HideLinks(logging.Filter):
+    """uvicorn's access log writes the whole request line, and the text after /l/ is the entire
+    address of a hosted script: anyone who can read the platform's logs could run it. This swaps
+    it for <hidden> before the line is written, whether it sits in the arguments or the message.
+    The arguments keep their shape (uvicorn's own formatter unpacks five of them)."""
+    LINK = re.compile(r"/l/[^\s?#\"/]+")
+
+    def hide(self, value):
+        return self.LINK.sub("/l/<hidden>", value) if isinstance(value, str) else value
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            if isinstance(record.args, tuple):
+                record.args = tuple(self.hide(a) for a in record.args)
+            elif isinstance(record.args, dict):
+                record.args = {k: self.hide(v) for k, v in record.args.items()}
+            record.msg = self.hide(record.msg)
+        except Exception:                      # never let logging fail because of this
+            pass
+        return True
+
+
+def hide_links_in_logs() -> None:
+    """Put HideLinks on uvicorn's loggers, once however often this is called."""
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        logger = logging.getLogger(name)
+        if not any(isinstance(f, HideLinks) for f in logger.filters):
+            logger.addFilter(HideLinks())
+
+
+hide_links_in_logs()
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -624,26 +663,64 @@ def find_order(session_id: str):
         db.close()
 
 
-# ── Tiny in-memory rate limit for starting checkouts ───────────────────────
-_hits: dict = {}
+# ── Tiny in-memory rate limits ─────────────────────────────────────────────
+_hits: dict = {}          # counts over a minute (checkouts, link opens, wrong passwords)
+_slow_hits: dict = {}     # counts over an hour, kept apart so tidying one store never forgets the other
+RATE_TIDY_AT      = 5000      # forget expired counts once a store holds this many addresses
+RATE_MAX_TRACKED  = 10_000    # and if it still holds more than this, drop the older half
 
 
-def rate_limited(ip: str, limit: int = 8, window: float = 60.0, record: bool = True) -> bool:
+def rate_limited(ip: str, limit: int = 8, window: float = 60.0, record: bool = True,
+                 store: dict | None = None) -> bool:
     """True when `ip` has already used `limit` attempts inside the window. A call counts as an
-    attempt unless record is False, which only looks."""
+    attempt unless record is False, which only looks. Every window has a store of its own."""
+    store  = _hits if store is None else store
     now    = time.monotonic()
-    recent = [t for t in _hits.get(ip, []) if now - t < window]
+    recent = [t for t in store.get(ip, []) if now - t < window]
     if len(recent) >= limit:
-        _hits[ip] = recent
+        store[ip] = recent
         return True
     if not record:
         return False
     recent.append(now)
-    _hits[ip] = recent
-    if len(_hits) > 5000:  # keep memory bounded
-        for k in [k for k, v in _hits.items() if not v or now - v[-1] >= window]:
-            _hits.pop(k, None)
+    store[ip] = recent
+    if len(store) > RATE_TIDY_AT:  # keep memory bounded
+        for k in [k for k, v in store.items() if not v or now - v[-1] >= window]:
+            store.pop(k, None)
+        if len(store) > RATE_MAX_TRACKED:
+            for k in list(store)[: len(store) // 2]:
+                store.pop(k, None)
     return False
+
+
+def hourly_limited(key: str, limit: int, record: bool = True) -> bool:
+    """rate_limited over an hour, in its own store."""
+    return rate_limited(key, limit, 3600.0, record, _slow_hits)
+
+
+_address_note_done = False
+
+
+def client_ip(request: Request) -> str:
+    """Who is asking, for the limits above. Railway's edge sets X-Real-IP to the visitor's address
+    (its docs list it for that). A visitor can add an X-Forwarded-For of their own and uvicorn is
+    told to trust that header, so the address it reports can be faked; X-Real-IP is used when it
+    is a valid address, otherwise the address uvicorn reports. Once per start the log says whether
+    the two agree, without printing either."""
+    global _address_note_done
+    reported = request.client.host if request.client else "unknown"
+    try:
+        real = str(ipaddress.ip_address(request.headers.get("x-real-ip", "").strip()))
+    except ValueError:
+        return reported
+    if not _address_note_done:
+        _address_note_done = True
+        try:
+            same = real == str(ipaddress.ip_address(reported))
+        except ValueError:
+            same = False
+        log.info("Visitor address: X-Real-IP %s the address uvicorn reports", "matches" if same else "differs from")
+    return real
 
 
 # ── App ────────────────────────────────────────────────────────────────────
@@ -657,6 +734,9 @@ async def lifespan(_app: FastAPI):
     if LUARMOR_USE_API and not luarmor.configured:
         log.warning("LUARMOR_USE_API is on but LUARMOR_API_KEY / LUARMOR_PROJECT_ID are not (both) set, "
                     "or the project id is malformed — the Luarmor API will not be used")
+    note = admin_setup_note()
+    if note:
+        log.warning(note)
     try:
         counts = stock_counts()
     except Exception:
@@ -809,7 +889,7 @@ async def start_checkout(request: Request, plan_id: str, form: dict | None = Non
     if form.get("agree") != "yes":
         return message(request, "Agree to the terms first",
                        "Tick the box to accept the terms of service, then choose your key again.", 400)
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     if rate_limited(ip):
         return message(request, "Too many attempts",
                        "Wait a minute, then start checkout again.", 429)
@@ -1023,7 +1103,12 @@ SCRIPT_TOKEN_RE        = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 SCRIPT_MAX_BYTES       = 8 * 1024 * 1024
 SCRIPT_FETCHES_PER_MIN = 30     # per address; a loader runs once, so this only slows scraping
 ADMIN_TOKEN_MIN        = 24
+ADMIN_TOKEN_DISTINCT_MIN = 10   # ...and this many different characters, so "aaaa…" or "abab…" can't be it
 ADMIN_FAILS_PER_MIN    = 10     # wrong passwords per address before it is told to wait
+ADMIN_FAILS_PER_HOUR   = 30     # ...and per hour, which stops a guesser who goes slowly
+ADMIN_ADDRESSES_KEPT   = 50     # sign-in addresses remembered for the "new address" note
+LINK_MISSES_PER_MIN    = 5      # wrong links per address before it is told to wait
+LINK_MISSES_PER_HOUR   = 20
 NO_STORE               = {"Cache-Control": "no-store", "X-Robots-Tag": "noindex"}
 BROWSER_DESTINATIONS   = {"document", "iframe", "frame", "embed", "object"}   # Sec-Fetch-Dest of a page load
 
@@ -1043,8 +1128,27 @@ SCRIPT_ROTATE_SQL = "UPDATE hosted_scripts SET token = :token, updated_at = :now
 SCRIPT_DELETE_SQL = "DELETE FROM hosted_scripts WHERE name = :name"
 
 
+def admin_password_problem(value: str):
+    """None when `value` may be the admin password, otherwise why not, in words that never quote it."""
+    if len(value) < ADMIN_TOKEN_MIN:
+        return f"shorter than {ADMIN_TOKEN_MIN} characters"
+    if len(set(value)) < ADMIN_TOKEN_DISTINCT_MIN:
+        return f"made of fewer than {ADMIN_TOKEN_DISTINCT_MIN} different characters"
+    return None
+
+
 def admin_enabled() -> bool:
-    return len(SCRIPT_ADMIN_TOKEN) >= ADMIN_TOKEN_MIN
+    return admin_password_problem(SCRIPT_ADMIN_TOKEN) is None
+
+
+def admin_setup_note():
+    """A start-up warning when SCRIPT_ADMIN_TOKEN is set but can't be used, otherwise None.
+    Not setting it at all is fine and says nothing. The password itself is never quoted."""
+    problem = admin_password_problem(SCRIPT_ADMIN_TOKEN) if SCRIPT_ADMIN_TOKEN else None
+    if problem is None:
+        return None
+    return (f"SCRIPT_ADMIN_TOKEN is {problem}, so /admin stays switched off. "
+            "Set a longer random value and redeploy.")
 
 
 def script_loadstring(base: str, token: str) -> str:
@@ -1125,7 +1229,11 @@ def admin_check(request: Request, mutating: bool = False):
     website's form or request can't add."""
     if not admin_enabled():
         raise StarletteHTTPException(status_code=404)
-    key = f"admin:{request.client.host if request.client else 'unknown'}"
+    ip  = client_ip(request)
+    key = f"admin:{ip}"
+    if hourly_limited(key, ADMIN_FAILS_PER_HOUR, record=False):
+        return PlainTextResponse("Too many wrong passwords. Try again in an hour.", status_code=429,
+                                 headers={"Retry-After": "3600", **NO_STORE})
     if rate_limited(key, ADMIN_FAILS_PER_MIN, record=False):
         return PlainTextResponse("Too many wrong passwords. Wait a minute.", status_code=429,
                                  headers={"Retry-After": "60", **NO_STORE})
@@ -1136,11 +1244,27 @@ def admin_check(request: Request, mutating: bool = False):
                                  status_code=401, headers=signin)
     if not hmac.compare_digest(given.encode(), SCRIPT_ADMIN_TOKEN.encode()):
         rate_limited(key, ADMIN_FAILS_PER_MIN)      # count this wrong password
-        log.warning("Wrong admin password from %s", key.split(":", 1)[1])
+        hourly_limited(key, ADMIN_FAILS_PER_HOUR)
+        log.warning("Wrong admin password from %s", ip)
         return PlainTextResponse("Wrong password.", status_code=401, headers=signin)
     if mutating and from_browser and request.headers.get("x-admin-request") != "1":
         return PlainTextResponse("Refused.", status_code=403, headers=NO_STORE)
+    note_admin_address(ip)
     return None
+
+
+_admin_seen_addresses: set = set()
+
+
+def note_admin_address(ip: str) -> None:
+    """Log the first sign-in from each address, so one that wasn't yours stands out. The list is
+    cleared when it is full, which makes an address count as new again rather than go unnoted."""
+    if ip in _admin_seen_addresses:
+        return
+    if len(_admin_seen_addresses) >= ADMIN_ADDRESSES_KEPT:
+        _admin_seen_addresses.clear()
+    _admin_seen_addresses.add(ip)
+    log.info("Admin signed in from a new address: %s", ip)
 
 
 def admin_error(message_text: str, status: int) -> JSONResponse:
@@ -1170,12 +1294,21 @@ async def script_file(request: Request, token: str):
     shows nothing to someone who only pastes it into a tab."""
     if opened_as_a_page(request):
         return RedirectResponse("/", status_code=302, headers=NO_STORE)
-    ip = request.client.host if request.client else "unknown"
+    ip = client_ip(request)
     if rate_limited(f"l:{ip}", SCRIPT_FETCHES_PER_MIN):
         return PlainTextResponse("Too many requests. Wait a minute.", status_code=429,
                                  headers={"Retry-After": "60", **NO_STORE})
+    misses = f"lmiss:{ip}"           # wrong links: an address that keeps guessing waits, even for the right one
+    if hourly_limited(misses, LINK_MISSES_PER_HOUR, record=False):
+        return PlainTextResponse("Too many wrong links. Try again in an hour.", status_code=429,
+                                 headers={"Retry-After": "3600", **NO_STORE})
+    if rate_limited(misses, LINK_MISSES_PER_MIN, record=False):
+        return PlainTextResponse("Too many wrong links. Wait a minute.", status_code=429,
+                                 headers={"Retry-After": "60", **NO_STORE})
     body = await run_in_threadpool(serve_script, token) if SCRIPT_TOKEN_RE.fullmatch(token) else None
     if body is None:
+        rate_limited(misses, LINK_MISSES_PER_MIN)
+        hourly_limited(misses, LINK_MISSES_PER_HOUR)
         return PlainTextResponse("Not found", status_code=404, headers=NO_STORE)
     return Response(content=body, media_type="text/plain", headers=NO_STORE)
 
