@@ -4,7 +4,7 @@
 <section class="hero" aria-labelledby="hero-h">
   <div>
     <h1 id="hero-h">Tracker Access keys, ready in seconds</h1>
-    <p class="lede">Pay by card, copy your key, and run <code>/claim_key</code> in our Discord. The role comes off by itself when your time runs out.</p>
+    <p class="lede">Pay by card, copy your key, and press <strong>Redeem Key</strong> in our Discord. Your time only starts the first time you use it.</p>
     <div class="hero-actions">
       <a class="btn btn-primary" href="#keys">Choose a key</a>
       {% if support_url %}<a class="btn btn-ghost" href="{{ support_url }}" rel="noopener">Join the Discord</a>{% endif %}
@@ -12,17 +12,17 @@
     <ul class="perks">
       <li>Your key appears right after payment</li>
       <li>Secure checkout by Stripe</li>
-      <li>Role removed and a DM sent when time is up</li>
+      <li>Your time starts when you first use the key</li>
     </ul>
   </div>
 
   <div class="demo" aria-hidden="true">
     <div class="demo-bar"><span>In Discord</span><span>Example</span></div>
     <div class="demo-body">
-      <p class="demo-cmd"><b>/claim_key</b> key: TRK-W-XXXX-XXXX-XXXX</p>
+      <p class="demo-cmd"><b>Redeem Key</b> key: XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX</p>
       <div class="demo-reply">
-        <strong>Key claimed</strong>
-        <span>You now have the Tracker Access role.</span>
+        <strong>Key redeemed</strong>
+        <span>Press Get Script for your loader.</span>
       </div>
       <div class="span">
         {% for i in range(7) %}<span class="slot on"></span>{% endfor %}
@@ -94,7 +94,7 @@
       </div>
       <button type="submit" class="solid buy-btn" data-busy="Opening checkout…" {% if not checkout_ready %}disabled{% endif %}>Buy key</button>
     </div>
-    <p class="picker-note">Your time starts when you run <code>/claim_key</code>, not when you pay.</p>
+    <p class="picker-note">Your time starts the first time you redeem the key or run the script, not when you pay.</p>
   </div>
   </form>
   {% if not checkout_ready %}
@@ -116,8 +116,8 @@
       <p>It shows on the confirmation page as soon as the payment goes through.</p>
     </li>
     <li>
-      <strong>Claim it in Discord</strong>
-      <p>Run <code>/claim_key</code> and paste the key. You get the Tracker Access role, and we DM you when your time is up.</p>
+      <strong>Redeem it in Discord</strong>
+      <p>Press <strong>Redeem Key</strong> on the Death Tracker panel and paste the key, then press <strong>Get Script</strong> for your loader.</p>
     </li>
   </ol>
 </section>
@@ -129,15 +129,15 @@
   <div class="faq">
     <details>
       <summary>When does my time start?</summary>
-      <p>When you run <code>/claim_key</code>, not when you pay. You can buy now and claim later.</p>
+      <p>The first time you redeem the key or run the script, not when you pay. You can buy now and redeem later.</p>
     </details>
     <details>
       <summary>Can I buy more than one key?</summary>
-      <p>Yes. If you claim a second key while you still have access, its time is added to what you have left.</p>
+      <p>Yes. If you want to add a key while you still have time left, open a support ticket in our Discord and we'll sort it out.</p>
     </details>
     <details>
       <summary>What happens when my time is up?</summary>
-      <p>We remove the Tracker Access role and send you a DM. The role comes off either way: if your DMs from the server are closed, the message can't be delivered.</p>
+      <p>Your key stops working and the script no longer loads. Buy a new key to carry on.</p>
     </details>
     <details>
       <summary>I lost my key.</summary>

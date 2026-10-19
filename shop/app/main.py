@@ -1,18 +1,26 @@
 """Tracker Access shop.
 
-Stripe Checkout -> license key -> redeemed in Discord with /claim_key.
+Stripe Checkout -> Luarmor key -> redeemed with the Redeem Key button of the Luarmor panel
+in Discord. The key is made on Luarmor (app/luarmor.py) the moment a payment clears, with
+a length of 1, 7 or 30 days that starts counting when the buyer first redeems or runs it.
 Shares the Postgres database (table: license_keys) with the Discord bot.
 
 Environment:
   DATABASE_URL           required, same database the bot uses
   STRIPE_SECRET_KEY      sk_test_... / sk_live_... (checkout stays off until set)
   STRIPE_WEBHOOK_SECRET  whsec_... for POST /stripe/webhook
+  LUARMOR_API_KEY        Luarmor API key (checkout stays off until set)
+  LUARMOR_PROJECT_ID     id of the Luarmor project the keys belong to (checkout stays off until set)
+  LUARMOR_API_URL        default https://api.luarmor.net/v3 (only change it for testing)
   SITE_URL               public base URL, e.g. https://keys.example.com (optional)
   SUPPORT_URL            Discord invite shown on the site (optional)
   LOG_LEVEL              default INFO
 
+Luarmor only accepts API calls from IP addresses whitelisted in its dashboard, so the shop
+service needs a static outbound IP (Railway: service settings, Networking) that is added there.
+
 For Stripe, send the checkout.session.completed and charge.dispute.created events to
-/stripe/webhook. A disputed payment revokes its key; the Discord bot then removes the role.
+/stripe/webhook. A disputed payment blacklists its key on Luarmor and marks it revoked here.
 """
 import hashlib
 import json
@@ -39,6 +47,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import declarative_base, sessionmaker
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from .luarmor import DEFAULT_API_URL, Luarmor, LuarmorError
 
 # stdout, not the default stderr: Railway labels everything on stderr as an error, which
 # made every normal "Issued a key" line look like a failure in the log view.
@@ -67,6 +77,17 @@ STRIPE_SECRET_KEY     = _env("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = _env("STRIPE_WEBHOOK_SECRET")
 SITE_URL              = _env("SITE_URL").rstrip("/")
 SUPPORT_URL           = _env("SUPPORT_URL")
+LUARMOR_API_KEY       = _env("LUARMOR_API_KEY")
+LUARMOR_PROJECT_ID    = _env("LUARMOR_PROJECT_ID")
+LUARMOR_API_URL       = _env("LUARMOR_API_URL", DEFAULT_API_URL)
+
+luarmor = Luarmor(LUARMOR_API_KEY, LUARMOR_PROJECT_ID, LUARMOR_API_URL)
+
+
+def checkout_ready() -> bool:
+    """Checkout only opens when Stripe can take the payment AND Luarmor can make the key,
+    so nobody pays for a key the shop has no way to issue."""
+    return bool(STRIPE_SECRET_KEY) and luarmor.configured
 
 # Prices are in pence (Stripe's minimum GBP charge is 30p). Must match the
 # plan names the bot understands ("day", "week", "month"), and "days" must match
@@ -80,7 +101,6 @@ PLANS = {
 DEFAULT_PLAN = "week"   # what the dropdown shows before anyone picks
 # Bump this date whenever the wording on /terms changes. It is saved on every payment.
 TOS_VERSION = "2026-10-16"
-KEY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O/1/I lookalikes
 SESSION_ID_RE = re.compile(r"^cs_(test|live)_[A-Za-z0-9]{10,200}$")
 
 
@@ -119,6 +139,8 @@ class LicenseKey(Base):
     # Payment dispute: when Stripe told us, and when the bot finished ending the access.
     dispute_at         = Column(DateTime(timezone=True), nullable=True)
     dispute_handled_at = Column(DateTime(timezone=True), nullable=True)
+    # When the key was blacklisted on Luarmor because of a dispute (stays empty until then).
+    luarmor_banned_at  = Column(DateTime(timezone=True), nullable=True)
 
 
 # Columns the shop owns on license_keys (the bot's own copy of the table doesn't map them).
@@ -132,6 +154,7 @@ SHOP_COLUMNS = {
     "payment_intent":     "VARCHAR(255)",
     "dispute_at":         "TIMESTAMPTZ",
     "dispute_handled_at": "TIMESTAMPTZ",
+    "luarmor_banned_at":  "TIMESTAMPTZ",
 }
 
 
@@ -145,11 +168,6 @@ def init_db():
                     f"ALTER TABLE license_keys ADD COLUMN IF NOT EXISTS {name} {sql_type}"))
         except Exception as e:  # SQLite has no IF NOT EXISTS for columns; fine for local runs
             log.info("%s column check skipped: %s", name, e)
-
-
-def generate_key(plan: str) -> str:
-    body = "".join(secrets.choice(KEY_ALPHABET) for _ in range(12))
-    return f"TRK-{plan[0].upper()}-{body[:4]}-{body[4:8]}-{body[8:]}"
 
 
 CURRENCY_SYMBOLS = {"usd": "$", "gbp": "£", "eur": "€"}
@@ -208,8 +226,91 @@ def order_details(row):
             "currency": (cur or CURRENCY).upper()}
 
 
+# ── Issuing a Luarmor key ──────────────────────────────────────────────────
+# A paid order gets its row in license_keys first, holding a placeholder key, and only then is
+# Luarmor asked for the real key. The unique order_ref means exactly one request (the webhook
+# or the success page, whichever is first) wins that insert and makes the Luarmor key, so a
+# buyer can never end up with two keys or an unsold one left behind on Luarmor.
+# The SQL sits in constants so the tests can run these exact statements on a scratch database.
+PENDING_PREFIX     = "PENDING-"   # placeholder in license_keys.key while Luarmor is being asked
+LEGACY_PREFIX      = "TRK-"       # keys the shop made itself before Luarmor (redeemed with /claim_key)
+PENDING_STALE_SECS = 180          # a placeholder older than this belongs to a request that died
+
+ORDER_ROW_SQL     = 'SELECT id, "key", pay_total, created_at FROM license_keys WHERE order_ref = :sid'
+CLAIM_ORDER_SQL   = ('INSERT INTO license_keys ("key", plan, order_ref, created_at, buyer_email, '
+                     'pay_currency, pay_subtotal, pay_tax, pay_discount, pay_total) '
+                     'VALUES (:key, :plan, :sid, :now, :email, :cur, :sub, :tax, :disc, :total)')
+TAKE_OVER_SQL     = 'UPDATE license_keys SET "key" = :new, created_at = :now WHERE id = :id AND "key" = :old'
+FINISH_ORDER_SQL  = 'UPDATE license_keys SET "key" = :key WHERE id = :id AND "key" = :pending'
+RELEASE_ORDER_SQL = 'DELETE FROM license_keys WHERE id = :id AND "key" = :pending'
+SAVE_PAY_SQL      = ('UPDATE license_keys SET pay_currency = :cur, pay_subtotal = :sub, pay_tax = :tax, '
+                     'pay_discount = :disc, pay_total = :total WHERE id = :id AND pay_total IS NULL')
+
+
+class KeyPending(Exception):
+    """Another request is making this order's key right now. Ask again in a moment."""
+
+
+def aware(dt):
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def new_placeholder() -> str:
+    return PENDING_PREFIX + secrets.token_hex(16)
+
+
+def pay_params(pay: dict) -> dict:
+    return {"cur": pay["pay_currency"], "sub": pay["pay_subtotal"], "tax": pay["pay_tax"],
+            "disc": pay["pay_discount"], "total": pay["pay_total"]}
+
+
+def order_row(sid: str):
+    with engine.begin() as conn:
+        return conn.execute(text(ORDER_ROW_SQL), {"sid": sid}).first()
+
+
+def claim_order(sid: str, plan_id: str, email, params: dict):
+    """Insert the order's row with a placeholder key. Returns (row id, placeholder) when this
+    call made the row, or None when another request got there first."""
+    placeholder = new_placeholder()
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(CLAIM_ORDER_SQL), {"key": placeholder, "plan": plan_id, "sid": sid,
+                                                 "now": utcnow(), "email": email, **params})
+    except IntegrityError:
+        return None
+    row = order_row(sid)
+    return (row[0], placeholder) if row is not None and row[1] == placeholder else None
+
+
+def release_order(row_id: int, placeholder: str) -> None:
+    """Give the order back (delete its placeholder row) so the next attempt starts clean."""
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(RELEASE_ORDER_SQL), {"id": row_id, "pending": placeholder})
+    except Exception:
+        log.exception("Could not release the placeholder for row %s; it expires by itself in %ss",
+                      row_id, PENDING_STALE_SECS)
+
+
+def discard_luarmor_key(key: str, sid: str) -> None:
+    """Best effort: delete a key Luarmor made that no order is going to get."""
+    try:
+        luarmor.delete_key(key)
+    except Exception as e:
+        log.error("Order %s: a Luarmor key was made but not used, and deleting it failed (%s). "
+                  "Delete this key by hand in the Luarmor dashboard: %s", sid, e, key)
+
+
 def fulfil(order: dict):
-    """Create (or return) the key for a paid Checkout Session. Safe to call repeatedly."""
+    """Create (or return) the Luarmor key for a paid Checkout Session. Safe to call repeatedly
+    and from several places at once.
+
+    Returns the key, or None for an order that isn't paid or has no valid plan. Raises
+    KeyPending when another request is making the key right now, and LuarmorError when Luarmor
+    can't make it; in both cases nothing is left half done, so calling again is safe."""
     if order.get("payment_status") != "paid":
         return None
     sid     = order.get("id")
@@ -217,43 +318,70 @@ def fulfil(order: dict):
     if not sid or plan_id not in PLANS:
         log.error("Paid order %s has no valid plan metadata (%r)", sid, plan_id)
         return None
-    email = (order.get("customer_details") or {}).get("email")
-    pay   = payment_fields(order)
+    email  = (order.get("customer_details") or {}).get("email")
+    params = pay_params(payment_fields(order))
 
-    for _ in range(3):
-        db = SessionLocal()
-        try:
-            row = db.query(LicenseKey).filter(LicenseKey.order_ref == sid).first()
-            if row:
-                existing = row.key
-                if row.pay_total is None and pay["pay_total"] is not None:
-                    try:  # keys issued before amounts were saved get them on the next event
-                        for name, value in pay.items():
-                            setattr(row, name, value)
-                        db.commit()
-                    except Exception:
-                        db.rollback()
-                        log.exception("Could not save the payment details for %s", sid)
-                return existing
-            key = generate_key(plan_id)
-            db.add(LicenseKey(key=key, plan=plan_id, order_ref=sid, buyer_email=email, **pay))
-            db.commit()
-            log.info("Issued a %s key for order %s", plan_id, sid)
+    mine = None   # (row id, placeholder) once this call owns the job of asking Luarmor
+    for _ in range(4):
+        row = order_row(sid)
+        if row is None:
+            mine = claim_order(sid, plan_id, email, params)
+            if mine:
+                break
+            continue                      # another request inserted it first; look again
+        row_id, key, pay_total, created = row[0], row[1], row[2], row[3]
+        if not key.startswith(PENDING_PREFIX):
+            if pay_total is None and params["total"] is not None:
+                try:  # keys issued before amounts were saved get them on the next event
+                    with engine.begin() as conn:
+                        conn.execute(text(SAVE_PAY_SQL), {"id": row_id, **params})
+                except Exception:
+                    log.exception("Could not save the payment details for %s", sid)
             return key
-        except IntegrityError:
-            db.rollback()  # raced the webhook or the success page; look again
-        finally:
-            db.close()
-    log.error("Could not issue a key for order %s after retries", sid)
-    return None
+        age = (utcnow() - aware(created)).total_seconds() if created else PENDING_STALE_SECS
+        if age < PENDING_STALE_SECS:
+            raise KeyPending(sid)         # someone else is asking Luarmor right now
+        taken = new_placeholder()         # that request died; take its job over
+        with engine.begin() as conn:
+            won = conn.execute(text(TAKE_OVER_SQL), {"new": taken, "now": utcnow(),
+                                                     "id": row_id, "old": key}).rowcount == 1
+        if won:
+            log.warning("Order %s: took over a stale placeholder (%.0fs old)", sid, age)
+            mine = (row_id, taken)
+            break
+    if mine is None:
+        log.error("Could not take the key job for order %s after retries", sid)
+        raise KeyPending(sid)
+
+    row_id, placeholder = mine
+    try:
+        key = luarmor.create_key(PLANS[plan_id]["days"], f"shop-{plan_id}-{sid[-10:]}")
+    except Exception:
+        release_order(row_id, placeholder)
+        raise
+    try:
+        with engine.begin() as conn:
+            saved = conn.execute(text(FINISH_ORDER_SQL), {"key": key, "id": row_id,
+                                                          "pending": placeholder}).rowcount == 1
+    except Exception:
+        release_order(row_id, placeholder)
+        discard_luarmor_key(key, sid)
+        raise
+    if not saved:
+        # Luarmor was slow enough that another request took this order over. It owns the order now.
+        log.error("Order %s: lost the placeholder while Luarmor was answering", sid)
+        discard_luarmor_key(key, sid)
+        raise KeyPending(sid)
+    log.info("Issued a %s Luarmor key for order %s", plan_id, sid)
+    return key
 
 
 def find_order(session_id: str):
     db = SessionLocal()
     try:
         row = db.query(LicenseKey).filter(LicenseKey.order_ref == session_id).first()
-        if row is None:
-            return None
+        if row is None or row.key.startswith(PENDING_PREFIX):
+            return None    # no key yet; the placeholder is not something to show a buyer
         # claimed_by == 0 is the bot's "revoked" marker (an owner, or a payment dispute), not a real Discord id.
         return {"key": row.key, "plan": row.plan,
                 "claimed": row.claimed_by is not None and row.claimed_by != 0,
@@ -289,6 +417,9 @@ async def lifespan(_app: FastAPI):
         log.warning("STRIPE_SECRET_KEY is not set — checkout is disabled")
     if not STRIPE_WEBHOOK_SECRET:
         log.warning("STRIPE_WEBHOOK_SECRET is not set — webhook is disabled")
+    if not luarmor.configured:
+        log.warning("LUARMOR_API_KEY / LUARMOR_PROJECT_ID are not (both) set, or the project id "
+                    "is malformed — checkout is disabled because no key could be issued")
     yield
 
 
@@ -383,7 +514,7 @@ def index(request: Request):
     } for pid, p in PLANS.items()]
     default_plan = DEFAULT_PLAN if DEFAULT_PLAN in PLANS else next(iter(PLANS))
     return render(request, "index.html", plans=plans, default_plan=default_plan,
-                  checkout_ready=bool(STRIPE_SECRET_KEY))
+                  checkout_ready=checkout_ready())
 
 
 @app.get("/terms")
@@ -410,7 +541,7 @@ async def start_checkout(request: Request, plan_id: str, form: dict | None = Non
     plan = PLANS.get(plan_id)
     if plan is None:
         return message(request, "Unknown key", "That key length doesn't exist. Pick one from the shop.", 404)
-    if not STRIPE_SECRET_KEY:
+    if not checkout_ready():
         return message(request, "Checkout isn't ready",
                        "Payments aren't switched on yet. Check back soon.", 503)
     if form is None:
@@ -436,7 +567,7 @@ async def start_checkout(request: Request, plan_id: str, form: dict | None = Non
                     "unit_amount": plan["pence"],
                     "product_data": {
                         "name": f"Tracker Access: {plan['name']}",
-                        "description": "Redeem in Discord with /claim_key",
+                        "description": "Redeem it with the Redeem Key button in our Discord",
                     },
                 },
             }],
@@ -476,6 +607,13 @@ async def stripe_webhook(request: Request):
         order = event["data"]["object"]
         try:
             key = await run_in_threadpool(fulfil, order)
+        except KeyPending:
+            log.info("Order %s: its key is being made by another request; Stripe will ask again",
+                     order.get("id"))
+            return JSONResponse({"error": "key is being made"}, status_code=500)  # Stripe retries
+        except LuarmorError as e:
+            log.error("Order %s: Luarmor couldn't make the key (%s); Stripe will retry", order.get("id"), e)
+            return JSONResponse({"error": "key service unavailable"}, status_code=500)  # Stripe retries
         except Exception:
             log.exception("Fulfilment failed for %s", order.get("id"))
             return JSONResponse({"error": "fulfilment failed"}, status_code=500)  # Stripe retries
@@ -488,6 +626,10 @@ async def stripe_webhook(request: Request):
         dispute = event["data"]["object"]
         try:
             outcome = await run_in_threadpool(handle_dispute, dispute)
+        except LuarmorError as e:
+            log.error("Dispute %s: the key could not be blacklisted on Luarmor (%s); Stripe will retry",
+                      dispute.get("id"), e)
+            return JSONResponse({"error": "key service unavailable"}, status_code=500)  # Stripe retries
         except Exception:
             log.exception("Handling dispute %s failed", dispute.get("id"))
             return JSONResponse({"error": "dispute handling failed"}, status_code=500)  # Stripe retries
@@ -538,7 +680,18 @@ def success(request: Request, session_id: str = ""):
             "total_details": raw.get("total_details") or {},
             "payment_intent": raw.get("payment_intent"),
         }
-        issued = fulfil(data)
+        try:
+            issued = fulfil(data)
+        except KeyPending:
+            return message(request, "Creating your key",
+                           "Your payment went through and your key is being created. "
+                           "This page checks again on its own.", 200, refresh=3)
+        except LuarmorError as e:
+            log.error("Order %s: Luarmor couldn't make the key (%s)", session_id, e)
+            return message(request, "Creating your key",
+                           "Your payment went through but the key isn't ready yet. This page keeps "
+                           "trying. If it is still here after a few minutes, open a support ticket "
+                           f"in the Discord with this order ID: {session_id}", 503, refresh=8)
         if issued is not None:
             save_payment_intent(session_id, data["payment_intent"])
         if issued is None:
@@ -568,7 +721,8 @@ def success(request: Request, session_id: str = ""):
 @app.get("/health")
 @app.head("/health")
 def health():
-    return {"ok": True, "checkout": bool(STRIPE_SECRET_KEY), "webhook": bool(STRIPE_WEBHOOK_SECRET)}
+    return {"ok": True, "checkout": checkout_ready(), "webhook": bool(STRIPE_WEBHOOK_SECRET),
+            "luarmor": luarmor.configured}
 
 
 @app.get("/robots.txt")
@@ -658,10 +812,33 @@ def key_id_for_payment(payment_intent: str):
     return row[0]
 
 
+KEY_BAN_STATE_SQL = 'SELECT "key", luarmor_banned_at FROM license_keys WHERE id = :id'
+MARK_BANNED_SQL   = "UPDATE license_keys SET luarmor_banned_at = :now WHERE id = :id AND luarmor_banned_at IS NULL"
+
+
+def ban_on_luarmor(key_id: int) -> str:
+    """Blacklist a disputed order's key on Luarmor so it stops loading the script. Returns what
+    happened ("banned", "already banned", "not a Luarmor key", "no key"). Raises LuarmorError when
+    Luarmor can't be told; the dispute stays recorded and the next Stripe retry tries again."""
+    with engine.begin() as conn:
+        row = conn.execute(text(KEY_BAN_STATE_SQL), {"id": key_id}).first()
+    if row is None:
+        return "no key"
+    key, banned_at = row[0], row[1]
+    if banned_at is not None:
+        return "already banned"
+    if key.startswith((LEGACY_PREFIX, PENDING_PREFIX)):
+        return "not a Luarmor key"      # the Discord bot ends access for the old keys
+    luarmor.blacklist_key(key, "Payment dispute")
+    with engine.begin() as conn:
+        conn.execute(text(MARK_BANNED_SQL), {"now": utcnow(), "id": key_id})
+    return "banned"
+
+
 def handle_dispute(dispute: dict) -> str:
     """Revoke the key a disputed payment bought. Returns "recorded", "duplicate" (Stripe sent
-    the event again) or "unmatched" (not a payment for one of our keys). Raises if the database
-    or Stripe can't be reached, so the webhook answers 500 and Stripe sends the event again."""
+    the event again) or "unmatched" (not a payment for one of our keys). Raises if the database,
+    Stripe or Luarmor can't be reached, so the webhook answers 500 and Stripe sends the event again."""
     did = dispute.get("id")
     pi  = dispute.get("payment_intent")
     if not isinstance(pi, str) or not pi:
@@ -674,7 +851,10 @@ def handle_dispute(dispute: dict) -> str:
     with engine.begin() as conn:
         recorded = conn.execute(text(RECORD_DISPUTE_SQL),
                                 {"now": utcnow(), "id": key_id}).rowcount == 1
+    # Also on a repeat event: if telling Luarmor failed last time, this is the retry that finishes it.
+    banned = ban_on_luarmor(key_id)
     if not recorded:
+        log.info("Dispute %s repeated for key row %s (Luarmor: %s)", did, key_id, banned)
         return "duplicate"
-    log.warning("Dispute %s recorded: key row %s is revoked and its access will end", did, key_id)
+    log.warning("Dispute %s recorded: key row %s is revoked (Luarmor: %s)", did, key_id, banned)
     return "recorded"

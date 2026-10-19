@@ -6,7 +6,7 @@
 {% block main %}
 <section class="intro">
   <h1>Payment received</h1>
-  <p class="lede">Here is your {{ plan_name }} key. Keep this page's link: opening it again shows the key again. Lost keys can't be refunded.</p>
+  <p class="lede">Here is your {{ plan_name }} key. Your time starts the first time you redeem it or run the script, not now. Keep this page's link: opening it again shows the key again. Lost keys can't be refunded.</p>
 </section>
 
 <section aria-labelledby="key-h">
@@ -16,7 +16,6 @@
   <p class="order-note">If anything goes wrong, open a support ticket in the Discord and quote this order ID.</p>
   <div class="actions">
     <button type="button" class="solid" data-copy="{{ key }}" data-label="Copy key" data-fallback="#key">Copy key</button>
-    <button type="button" class="ghost" data-copy="/claim_key {{ key }}" data-label="Copy command" data-fallback="#key">Copy command</button>
     <button type="button" class="ghost" data-copy="{{ order_id }}" data-label="Copy order ID" data-fallback="#order-id">Copy order ID</button>
   </div>
   {% if details %}
@@ -42,9 +41,9 @@
 <section aria-labelledby="next-h">
   <div class="section-head"><h2 id="next-h">Redeem it</h2></div>
   <ol class="steps">
-    <li><strong>Open our Discord</strong><p>Join the server if you haven't already.</p></li>
-    <li><strong>Run the command</strong><p>Type <code>/claim_key</code> and paste your key.</p></li>
-    <li><strong>Your time starts</strong><p>We remove the role and send you a DM when it ends.</p></li>
+    <li><strong>Open our Discord</strong><p>Join the server if you haven't already, then find the Death Tracker panel.</p></li>
+    <li><strong>Press Redeem Key</strong><p>Paste your key exactly as shown above. It is case sensitive.</p></li>
+    <li><strong>Get your script</strong><p>Press <strong>Get Script</strong> for your loader. <strong>Get Role</strong> gives you your buyer role. Your time starts counting from your first redeem or run.</p></li>
   </ol>
   {% if support_url %}
   <p class="actions"><a class="btn btn-primary" href="{{ support_url }}" rel="noopener">Open the Discord</a></p>
