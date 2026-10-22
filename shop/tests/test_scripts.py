@@ -10,6 +10,7 @@ import html
 import json
 import re
 import sys
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -25,6 +26,7 @@ PASSWORD = "correct-horse-battery-staple-0123456789"      # 39 characters
 WRONG = "wrong-password-wrong-password-1"
 SCRIPT = "print('hello from V4')\n"
 LINK_RE = re.compile(r'/l/([A-Za-z0-9_-]+)"\)\)\(\)$')
+STAGE_RE = re.compile(r'local BASE, TOKEN, NONCE, SECRET = "([^"]*)", "([^"]*)", "([^"]*)", "([^"]*)"')
 APP_DIR = HERE.parent / "app"
 
 
@@ -46,11 +48,11 @@ class ScriptCase(ShopCase):
 
     # ── requests ───────────────────────────────────────────────────────────
     def call(self, route, path, method="GET", body=b"", auth=None, headers=None,
-             ip="203.0.113.9", **route_args):
+             ip="203.0.113.9", query=b"", **route_args):
         sent = dict(headers or {})
         if auth:
             sent["authorization"] = auth
-        request = stubs.make_request(path, method, body=body, headers=sent, client=(ip, 5000))
+        request = stubs.make_request(path, method, query=query, body=body, headers=sent, client=(ip, 5000))
         return asyncio.run(route(request, **route_args))
 
     def upload(self, name, body=SCRIPT, auth=None, headers=None, ip="203.0.113.9"):
@@ -69,8 +71,33 @@ class ScriptCase(ShopCase):
     def page(self, auth=None, headers=None, ip="203.0.113.9"):
         return self.call(main.admin_page, "/admin", auth=auth or bearer(PASSWORD), headers=headers, ip=ip)
 
-    def fetch(self, token, ip="198.51.100.7", headers=None):
+    def stage_one(self, token, ip="198.51.100.7", headers=None):
+        """What /l/<token> answers: the loader."""
         return self.call(main.script_file, f"/l/{token}", ip=ip, headers=headers, token=token)
+
+    def parse_stage(self, resp):
+        """(base, token, nonce, secret) the loader carries."""
+        found = STAGE_RE.search(resp.body.decode())
+        self.assertIsNotNone(found, resp.body[:200])
+        return found.groups()
+
+    def payload(self, token, nonce, sig, ip="198.51.100.7", headers=None):
+        return self.call(main.script_payload, f"/p/{token}", ip=ip, headers=headers,
+                         query=f"n={nonce}&s={sig}".encode(), token=token)
+
+    def fetch(self, token, ip="198.51.100.7", headers=None):
+        """What an executor ends up with: the loader is fetched, its request is signed and sent and the
+        payload is decrypted. A failure at either step comes back as it was answered."""
+        first = self.stage_one(token, ip, headers)
+        if first.status_code != 200:
+            return first
+        _base, _token, nonce, secret = self.parse_stage(first)
+        second = self.payload(token, nonce, main.loader.sign(secret, token, nonce), ip, headers)
+        if second.status_code != 200:
+            return second
+        plain = main.loader.decrypt(secret, nonce, second.body)
+        self.assertIsNotNone(plain, "the payload did not decrypt")
+        return types.SimpleNamespace(status_code=200, body=plain, headers=second.headers)
 
     def data(self, resp):
         return json.loads(resp.body)
@@ -106,7 +133,7 @@ class ServingTests(ScriptCase):
 
     def test_nobody_needs_to_sign_in_to_run_it(self):
         token, _ = self.add()
-        resp = self.call(main.script_file, f"/l/{token}", ip="198.51.100.77", token=token)
+        resp = self.fetch(token, ip="198.51.100.77")
         self.assertEqual((resp.status_code, resp.body), (200, SCRIPT.encode()))
 
     def test_a_large_script_with_windows_line_endings_and_non_ascii_text_comes_back_byte_for_byte(self):

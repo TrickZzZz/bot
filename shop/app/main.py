@@ -27,6 +27,8 @@ Environment:
   LOG_LEVEL              default INFO
   SCRIPT_ADMIN_TOKEN     password for /admin, where scripts are hosted (24+ characters; until it
                          is set, /admin and the upload routes answer as if they did not exist)
+  LOADER_SECRET          key material for the hosted loader (24+ characters, optional; without it
+                         SCRIPT_ADMIN_TOKEN is used). Changing it breaks nothing: each loader is made per request
 
 Stock keys must be made in the Luarmor dashboard to last N days from first use, not until a
 fixed date, or the time would run out before the buyer starts. The variables are read when the
@@ -42,12 +44,18 @@ For Stripe, send the checkout.session.completed and charge.dispute.created event
 /stripe/webhook. A disputed payment revokes its key here and blacklists it on Luarmor.
 
 Hosted scripts are separate from the shop: nothing on the storefront mentions them and they need
-no key. A script uploaded on /admin is served as plain text at /l/<token>, so its loadstring is
+no key. A script uploaded on /admin has the loadstring
     loadstring(game:HttpGet("https://<site>/l/<token>"))()
+That link serves a short loader (app/loader.py), not the script: the loader asks /p/<token> for the
+script with a signed, one-time request, receives it encrypted and decrypts it in the executor, so
+a browser, curl or a saved copy of the link never holds the script and a captured request works
+once. Users type no key. The loader carries its link's secret, so someone who runs it can still
+read the script after it is decrypted; the script's own obfuscation is what protects it from there.
+The key material is LOADER_SECRET when it is set (24+ characters), otherwise SCRIPT_ADMIN_TOKEN.
 The token is random, so only people who were given the link can find it, but anyone who has the
 link can run the script. "New link" on /admin changes the token and the old link stops working.
-A browser that opens the link is sent to the home page instead of being shown the script; the
-executor's HttpGet still gets it. That is a courtesy, not security: curl can send any header.
+A browser that opens the link is sent to the home page; the executor's HttpGet is not. That is a
+courtesy, not security: curl can send any header.
 Guessing is slowed per address (X-Real-IP, which Railway's edge sets, else the address uvicorn
 reports): wrong passwords on /admin, 10 a minute and 30 an hour, and wrong links, 5 a minute and
 20 an hour. SCRIPT_ADMIN_TOKEN needs 24+ characters, 10+ of them different, or /admin stays off
@@ -84,6 +92,7 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from . import loader
 from .luarmor import DEFAULT_API_URL, KEY_RE, Luarmor, LuarmorError
 
 # stdout, not the default stderr: Railway labels everything on stderr as an error, which
@@ -153,6 +162,8 @@ SITE_URL              = _env("SITE_URL").rstrip("/")
 SUPPORT_URL           = _env("SUPPORT_URL")
 # Password of the /admin page (hosted scripts). Shorter than 24 characters counts as not set.
 SCRIPT_ADMIN_TOKEN    = _env("SCRIPT_ADMIN_TOKEN")
+# Key material for the hosted loader (app/loader.py). Optional: SCRIPT_ADMIN_TOKEN is used when it is not set.
+LOADER_SECRET         = _env("LOADER_SECRET")
 LUARMOR_API_KEY       = _env("LUARMOR_API_KEY")
 LUARMOR_PROJECT_ID    = _env("LUARMOR_PROJECT_ID")
 LUARMOR_API_URL       = _env("LUARMOR_API_URL", DEFAULT_API_URL)
@@ -737,6 +748,8 @@ async def lifespan(_app: FastAPI):
     note = admin_setup_note()
     if note:
         log.warning(note)
+    if LOADER_SECRET and len(LOADER_SECRET) < loader.MIN_SECRET_LEN:
+        log.warning("LOADER_SECRET is shorter than %d characters, so it is not used for the hosted loader", loader.MIN_SECRET_LEN)
     try:
         counts = stock_counts()
     except Exception:
@@ -1115,6 +1128,8 @@ BROWSER_DESTINATIONS   = {"document", "iframe", "frame", "embed", "object"}   # 
 SCRIPT_SERVE_SQL  = ("UPDATE hosted_scripts SET hits = hits + 1, last_hit_at = :now "
                      "WHERE token = :token RETURNING body")
 SCRIPT_EXISTS_SQL = "SELECT 1 FROM hosted_scripts WHERE name = :name"
+SCRIPT_FIND_SQL   = "SELECT 1 FROM hosted_scripts WHERE token = :token"   # a loader request: no visit counted yet
+NONCES            = loader.NonceStore()                                  # one-time numbers handed to loaders
 # A new name gets the token passed in; an existing name keeps its own, so the link people
 # already have keeps working after the script is replaced.
 SCRIPT_SAVE_SQL   = ("INSERT INTO hosted_scripts (name, token, body, size, sha256, hits, created_at, updated_at) "
@@ -1164,6 +1179,12 @@ def serve_script(token: str):
     with engine.begin() as conn:
         row = conn.execute(text(SCRIPT_SERVE_SQL), {"token": token, "now": utcnow()}).first()
     return row[0] if row else None
+
+
+def script_exists(token: str) -> bool:
+    """True when a script has this token. The visit is counted later, when the script itself is sent."""
+    with engine.begin() as conn:
+        return conn.execute(text(SCRIPT_FIND_SQL), {"token": token}).first() is not None
 
 
 def save_script(name: str, body: str, size: int, sha: str):
@@ -1289,9 +1310,10 @@ def opened_as_a_page(request: Request) -> bool:
 
 @app.get("/l/{token}")
 async def script_file(request: Request, token: str):
-    """The hosted script as plain text, for loadstring(game:HttpGet(...))(). A browser that opens
-    the link is sent to the home page instead, whether or not the link is real, so the address
-    shows nothing to someone who only pastes it into a tab."""
+    """Stage 1 of the hosted script (app/loader.py), for loadstring(game:HttpGet(...))(): a short
+    loader that fetches and decrypts the script itself. A browser that opens the link is sent to
+    the home page instead, whether or not the link is real, so the address shows nothing to
+    someone who only pastes it into a tab."""
     if opened_as_a_page(request):
         return RedirectResponse("/", status_code=302, headers=NO_STORE)
     ip = client_ip(request)
@@ -1305,12 +1327,42 @@ async def script_file(request: Request, token: str):
     if rate_limited(misses, LINK_MISSES_PER_MIN, record=False):
         return PlainTextResponse("Too many wrong links. Wait a minute.", status_code=429,
                                  headers={"Retry-After": "60", **NO_STORE})
-    body = await run_in_threadpool(serve_script, token) if SCRIPT_TOKEN_RE.fullmatch(token) else None
-    if body is None:
+    master = loader.master_key(LOADER_SECRET, SCRIPT_ADMIN_TOKEN)
+    found = bool(master) and bool(SCRIPT_TOKEN_RE.fullmatch(token)) and await run_in_threadpool(script_exists, token)
+    if not found:
         rate_limited(misses, LINK_MISSES_PER_MIN)
         hourly_limited(misses, LINK_MISSES_PER_HOUR)
         return PlainTextResponse("Not found", status_code=404, headers=NO_STORE)
-    return Response(content=body, media_type="text/plain", headers=NO_STORE)
+    nonce = NONCES.issue(token)
+    try:
+        stage = loader.stage_one(site_base(request), token, nonce, loader.link_secret(master, token))
+    except ValueError:
+        log.error("The hosted loader was not sent: the site address is not in a form it can use (check SITE_URL)")
+        return PlainTextResponse("Not found", status_code=404, headers=NO_STORE)
+    return Response(content=stage, media_type="text/plain", headers=NO_STORE)
+
+
+@app.get("/p/{token}")
+async def script_payload(request: Request, token: str):
+    """Stage 2: the script, encrypted, for one signed request from a loader this site handed out.
+    The signature must match the link's secret and the one-time number must be unused, unexpired
+    and issued for this link. Anything else is the same plain 404, whatever was wrong."""
+    if opened_as_a_page(request):
+        return RedirectResponse("/", status_code=302, headers=NO_STORE)
+    not_found = PlainTextResponse("Not found", status_code=404, headers=NO_STORE)
+    nonce = request.query_params.get("n", "")
+    given = request.query_params.get("s", "")
+    master = loader.master_key(LOADER_SECRET, SCRIPT_ADMIN_TOKEN)
+    if not (master and SCRIPT_TOKEN_RE.fullmatch(token) and loader.NONCE_RE.fullmatch(nonce) and loader.SIG_RE.fullmatch(given)):
+        return not_found
+    secret = loader.link_secret(master, token)
+    if not loader.signature_ok(secret, token, nonce, given) or not NONCES.take(token, nonce):
+        return not_found
+    body = await run_in_threadpool(serve_script, token)
+    if body is None:
+        return not_found
+    payload = await run_in_threadpool(loader.encrypt, secret, nonce, body.encode("utf-8"))
+    return Response(content=payload, media_type="text/plain", headers=NO_STORE)
 
 
 @app.get("/admin")
