@@ -81,10 +81,13 @@ TYPE_ROLES        = load_type_roles()
 active_cooldowns  = {}
 premium_cooldowns = {}
 
-for _rid in (1518294955611787475, 1518571590516740096, 1522920181104381953):
-    TYPE_ROLES[_rid] = ["5+ years old", "dump"]
+def can_use_panel(member) -> bool:
+    """Only members holding one of PANEL_ROLE_IDS (defined with the other role ids below) may use the panel."""
+    return any(r.id in PANEL_ROLE_IDS for r in (getattr(member, "roles", None) or []))
 
 def get_allowed_types(member):
+    if can_use_panel(member):
+        return list(ACCOUNT_TYPES)       # the old premium roles are gone: panel roles get every type
     allowed = set(DEFAULT_TYPES)
     for role in getattr(member, "roles", []):
         if role.id in TYPE_ROLES:
@@ -154,6 +157,11 @@ def parse_id_list(raw: str) -> frozenset:
 # If the variable is set but holds no valid ids, nobody can run them (fails closed).
 OWNER_ROLE_IDS  = parse_id_list(os.environ.get(
     "OWNER_ROLE_IDS", "1518282859524395251,1518288403144245269"))
+# Everyone can see the panel, but only these roles can use it (buttons and slash commands alike).
+# Fails closed: a variable that holds no valid ids lets nobody in.
+PANEL_ROLE_IDS  = parse_id_list(os.environ.get(
+    "PANEL_ROLE_IDS", "1554597975202857080,1518282859524395251"))
+PANEL_DENIED    = "You don't have a role that can use this panel."
 OWNER_KEY_PLANS = {"1d": "day", "1w": "week", "1m": "month"}   # /gen keylicense choice -> key plan
 PLAN_LABELS     = {"day": "1 day", "week": "1 week", "month": "1 month"}
 REVOKED_BY      = 0   # license_keys.claimed_by sentinel: revoked by an owner, never redeemable
@@ -237,6 +245,24 @@ def count_by_region(limit: int = 8):
         counts = [(str(r or "").upper(), int(c)) for r, c in rows if r and c > 0]
         counts.sort(key=lambda x: x[1], reverse=True)
         return counts[:limit]
+    finally: db.close()
+
+def stock_for_type(account_type: str):
+    """(total in stock, [(region code, count), ...]) for one account type, biggest region first.
+    The total includes accounts with no region; the list only has regions that have accounts."""
+    db = SessionLocal()
+    try:
+        from sqlalchemy import func
+        rows = (
+            db.query(func.upper(Account.region), func.count(Account.id))
+            .filter(Account.account_type == account_type)
+            .group_by(func.upper(Account.region))
+            .all()
+        )
+        total = sum(int(c) for _, c in rows)
+        regions = [(str(r).strip(), int(c)) for r, c in rows if r and str(r).strip() and c > 0]
+        regions.sort(key=lambda x: (-x[1], x[0]))
+        return total, regions
     finally: db.close()
 
 # ── Key helpers (sync DB work — call through asyncio.to_thread) ────────────
@@ -546,6 +572,10 @@ def db_mark_dispute_handled(key_id: int) -> bool:
 # ── Core generate logic ────────────────────────────────────────────────────
 async def do_generate(interaction: discord.Interaction, account_type: str, region: str = None):
     user_id = interaction.user.id
+    if not can_use_panel(interaction.user):
+        print(f"[panel] {interaction.user} ({user_id}) tried to generate without a panel role")
+        await interaction.response.send_message(PANEL_DENIED, ephemeral=True)
+        return
     allowed = get_allowed_types(interaction.user)
 
     if account_type not in allowed:
@@ -646,14 +676,19 @@ REGIONS = [
 ]
 
 class RegionSelect(discord.ui.Select):
-    def __init__(self, account_type: str):
+    def __init__(self, account_type: str, total: int, regions: list):
         self.account_type = account_type
-        options = [discord.SelectOption(label="Any region", value="any", default=True)]
-        for code, name in REGIONS:
-            options.append(discord.SelectOption(label=f"{name} ({code})", value=code))
+        # No option is pre-selected: Discord only sends a selection that changes, so a pre-selected
+        # "Any region" could not be picked without choosing another region first.
+        # Only regions that have stock right now are listed (Discord allows 25 options: Any + 24).
+        names = dict(REGIONS)
+        options = [discord.SelectOption(label=f"Any region — {total:,} in stock", value="any")]
+        for code, count in regions[:24]:
+            options.append(discord.SelectOption(
+                label=f"{names.get(code, code)} ({code}) — {count:,}", value=code))
         # No custom_id — this is a short-lived ephemeral view, not a persistent one.
         super().__init__(
-            placeholder="Select a region (optional)...",
+            placeholder="Choose a region, or Any region...",
             options=options, min_values=1, max_values=1,
         )
 
@@ -663,9 +698,9 @@ class RegionSelect(discord.ui.Select):
 
 
 class RegionView(discord.ui.View):
-    def __init__(self, account_type: str):
+    def __init__(self, account_type: str, total: int, regions: list):
         super().__init__(timeout=120)
-        self.add_item(RegionSelect(account_type))
+        self.add_item(RegionSelect(account_type, total, regions))
 
     async def on_timeout(self):
         # Disable the select so a stale click shows it's expired rather than erroring
@@ -680,11 +715,24 @@ class PanelView(discord.ui.View):
 
     async def _show_region_picker(self, interaction: discord.Interaction, account_type: str):
         """Send an ephemeral region picker — only the clicking user can see it."""
+        if not can_use_panel(interaction.user):
+            await interaction.response.send_message(PANEL_DENIED, ephemeral=True)
+            return
+        try:
+            total, regions = await asyncio.to_thread(stock_for_type, account_type)
+        except Exception as e:
+            print(f"[!] Could not read stock for {account_type}: {e}")
+            await interaction.response.send_message("Couldn't read the stock. Try again.", ephemeral=True)
+            return
+        if total <= 0:
+            await interaction.response.send_message(
+                f"No **{account_type}** accounts available right now.", ephemeral=True)
+            return
         embed = discord.Embed(
             description=f"Select a region for your **{account_type}** account.\nChoose **Any region** to get the next available.",
             color=0x7C3AED,
         )
-        await interaction.response.send_message(embed=embed, view=RegionView(account_type), ephemeral=True)
+        await interaction.response.send_message(embed=embed, view=RegionView(account_type, total, regions), ephemeral=True)
 
     @discord.ui.button(label="30 Day ", style=discord.ButtonStyle.primary,
                        custom_id="panel_30d", row=0)
