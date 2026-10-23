@@ -553,12 +553,14 @@ REGIONS = [
 class RegionSelect(discord.ui.Select):
     def __init__(self, account_type: str):
         self.account_type = account_type
-        options = [discord.SelectOption(label="Any region", value="any", default=True)]
+        # No option is pre-selected: Discord only sends a selection that changes, so a pre-selected
+        # "Any region" could not be picked without choosing another region first.
+        options = [discord.SelectOption(label="Any region", value="any")]
         for code, name in REGIONS:
             options.append(discord.SelectOption(label=f"{name} ({code})", value=code))
         # No custom_id — this is a short-lived ephemeral view, not a persistent one.
         super().__init__(
-            placeholder="Select a region (optional)...",
+            placeholder="Choose a region, or Any region...",
             options=options, min_values=1, max_values=1,
         )
 
