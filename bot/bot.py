@@ -53,7 +53,9 @@ def decrypt_secret(token: str) -> str:
 # ── Account types ──────────────────────────────────────────────────────────
 ACCOUNT_TYPES    = ["+30 days old", "+1 year old", "5+ years old", "dump"]
 DEFAULT_TYPES    = ["+30 days old", "+1 year old"]
-PREMIUM_TYPES    = {"5+ years old", "dump"}
+# No premium types any more: all four account types use the same role-based cooldown.
+# (Put types back in this set to give them the separate PREMIUM_COOLDOWN again.)
+PREMIUM_TYPES    = set()
 PREMIUM_COOLDOWN = 7200  # 2h
 
 # ── Role config ────────────────────────────────────────────────────────────
