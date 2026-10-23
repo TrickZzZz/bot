@@ -162,7 +162,7 @@ OWNER_ROLE_IDS  = parse_id_list(os.environ.get(
 # Everyone can see the panel, but only these roles can use it (buttons and slash commands alike).
 # Fails closed: a variable that holds no valid ids lets nobody in.
 PANEL_ROLE_IDS  = parse_id_list(os.environ.get(
-    "PANEL_ROLE_IDS", "1554597975202857080,1518282859524395251"))
+    "PANEL_ROLE_IDS", "1554597975202857080,1518282859524395251,1518294955611787475"))
 PANEL_DENIED    = "You don't have a role that can use this panel."
 OWNER_KEY_PLANS = {"1d": "day", "1w": "week", "1m": "month"}   # /gen keylicense choice -> key plan
 PLAN_LABELS     = {"day": "1 day", "week": "1 week", "month": "1 month"}
