@@ -81,10 +81,13 @@ TYPE_ROLES        = load_type_roles()
 active_cooldowns  = {}
 premium_cooldowns = {}
 
-for _rid in (1518294955611787475, 1518571590516740096, 1522920181104381953):
-    TYPE_ROLES[_rid] = ["5+ years old", "dump"]
+def can_use_panel(member) -> bool:
+    """Only members holding one of PANEL_ROLE_IDS (defined with the other role ids below) may use the panel."""
+    return any(r.id in PANEL_ROLE_IDS for r in (getattr(member, "roles", None) or []))
 
 def get_allowed_types(member):
+    if can_use_panel(member):
+        return list(ACCOUNT_TYPES)       # the old premium roles are gone: panel roles get every type
     allowed = set(DEFAULT_TYPES)
     for role in getattr(member, "roles", []):
         if role.id in TYPE_ROLES:
@@ -154,6 +157,11 @@ def parse_id_list(raw: str) -> frozenset:
 # If the variable is set but holds no valid ids, nobody can run them (fails closed).
 OWNER_ROLE_IDS  = parse_id_list(os.environ.get(
     "OWNER_ROLE_IDS", "1518282859524395251,1518288403144245269"))
+# Everyone can see the panel, but only these roles can use it (buttons and slash commands alike).
+# Fails closed: a variable that holds no valid ids lets nobody in.
+PANEL_ROLE_IDS  = parse_id_list(os.environ.get(
+    "PANEL_ROLE_IDS", "1554597975202857080,1518282859524395251"))
+PANEL_DENIED    = "You don't have a role that can use this panel."
 OWNER_KEY_PLANS = {"1d": "day", "1w": "week"}     # /gen keylicense choice -> key plan
 PLAN_LABELS     = {"day": "1 day", "week": "1 week"}
 REVOKED_BY      = 0   # license_keys.claimed_by sentinel: revoked by an owner, never redeemable
@@ -439,6 +447,10 @@ def db_end_user_access(user_id: int, guild_id: int) -> list:
 # ── Core generate logic ────────────────────────────────────────────────────
 async def do_generate(interaction: discord.Interaction, account_type: str, region: str = None):
     user_id = interaction.user.id
+    if not can_use_panel(interaction.user):
+        print(f"[panel] {interaction.user} ({user_id}) tried to generate without a panel role")
+        await interaction.response.send_message(PANEL_DENIED, ephemeral=True)
+        return
     allowed = get_allowed_types(interaction.user)
 
     if account_type not in allowed:
@@ -573,6 +585,9 @@ class PanelView(discord.ui.View):
 
     async def _show_region_picker(self, interaction: discord.Interaction, account_type: str):
         """Send an ephemeral region picker — only the clicking user can see it."""
+        if not can_use_panel(interaction.user):
+            await interaction.response.send_message(PANEL_DENIED, ephemeral=True)
+            return
         embed = discord.Embed(
             description=f"Select a region for your **{account_type}** account.\nChoose **Any region** to get the next available.",
             color=0x7C3AED,
