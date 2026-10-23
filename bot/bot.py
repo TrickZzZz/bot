@@ -764,8 +764,8 @@ def build_panel_embed(counts: dict) -> discord.Embed:
     lines = (
         f"**30 day** \u2014 {c30:,} in stock\n"
         f"**1 year** \u2014 {c1y:,} in stock\n"
-        f"**5 year** \u2014 {c5y:,} in stock  \u00b7  *premium*\n"
-        f"**Dump** \u2014 {cdmp:,} in stock  \u00b7  *premium*"
+        f"**5 year** \u2014 {c5y:,} in stock\n"
+        f"**Dump** \u2014 {cdmp:,} in stock"
     )
 
     embed = discord.Embed(
