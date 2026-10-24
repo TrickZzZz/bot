@@ -9,6 +9,9 @@ import secrets
 import time
 import json
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from dotenv import load_dotenv
 from sqlalchemy import (create_engine, Column, Integer, BigInteger, Boolean,
                         String, DateTime, Text, update, delete, or_,
@@ -507,6 +510,160 @@ def db_extend_access(guild_id: int, hours: int, user_id: int | None = None) -> l
     finally:
         db.close()
 
+# ── Luarmor sync ───────────────────────────────────────────────────────────
+# A whitelist lives in Luarmor and the role lives here, and they used to end at different times:
+# /extend and stacked keys only moved the role, so a whitelist could run out first. Luarmor now
+# decides. Every few minutes each live window is set to end when that member's whitelist ends,
+# and redeeming a key or /extend moves the whitelist as well. Members are matched by the Discord
+# ID Luarmor holds for them (set when they redeem in Luarmor's own panel); anyone Luarmor does not
+# know, or whose whitelist never expires, is left exactly as they are.
+# Off until LUARMOR_API_KEY and LUARMOR_PROJECT_ID are set. LUARMOR_SYNC_DRY=1 only logs what it would do.
+LUARMOR_API_KEY    = os.environ.get("LUARMOR_API_KEY", "").strip()
+LUARMOR_PROJECT_ID = os.environ.get("LUARMOR_PROJECT_ID", "").strip()
+LUARMOR_API_URL    = os.environ.get("LUARMOR_API_URL", "https://api.luarmor.net/v3").strip().rstrip("/")
+LUARMOR_DRY_RUN    = os.environ.get("LUARMOR_SYNC_DRY", "").strip().lower() in ("1", "true", "yes")
+LUARMOR_ON         = bool(LUARMOR_API_KEY) and re.fullmatch(r"[A-Za-z0-9_-]{8,64}", LUARMOR_PROJECT_ID) is not None
+LUARMOR_SLACK      = 90     # seconds the two end times may differ before the role is moved
+LUARMOR_PAUSE      = 0.5    # seconds between Luarmor calls, to stay well under its rate limit
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect: the API key must only ever go to the address configured."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+_luarmor_opener = urllib.request.build_opener(_NoRedirect)
+
+def luarmor_request(method: str, query: dict | None = None, body: dict | None = None) -> dict:
+    """One call to Luarmor's users endpoint. Returns the JSON object; raises RuntimeError otherwise."""
+    if not LUARMOR_ON:
+        raise RuntimeError("Luarmor isn't configured")
+    url = f"{LUARMOR_API_URL}/projects/{LUARMOR_PROJECT_ID}/users"
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    headers = {"Authorization": LUARMOR_API_KEY, "Accept": "application/json",
+               "User-Agent": "DeltaCoreBot/1.0"}
+    data = None
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    try:
+        with _luarmor_opener.open(req, timeout=15) as resp:
+            raw = resp.read(2_000_000)
+    except urllib.error.HTTPError as e:
+        detail = e.read(300).decode("utf-8", "replace").replace("\n", " ") if hasattr(e, "read") else ""
+        raise RuntimeError(f"Luarmor answered HTTP {e.code} for {method}: {detail}") from None
+    except (urllib.error.URLError, OSError) as e:
+        raise RuntimeError(f"Couldn't reach Luarmor: {e}") from None
+    try:
+        parsed = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        raise RuntimeError("Luarmor sent something that isn't JSON") from None
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Luarmor sent an unexpected reply")
+    if parsed.get("success") is False:
+        raise RuntimeError(f"Luarmor refused: {str(parsed.get('message') or parsed)[:200]}")
+    return parsed
+
+def luarmor_best(discord_id: int):
+    """(user_key, end as unix seconds) of this member's whitelist, or None when Luarmor has no
+    whitelist for them that ends at a set time. Only entries whose Discord ID really is theirs
+    count, so a reply that ignored the filter can never lead to someone else being changed."""
+    reply = luarmor_request("GET", query={"discord_id": str(discord_id)})
+    users = reply.get("users")
+    if not isinstance(users, list):
+        raise RuntimeError("Luarmor's reply had no list of users")
+    best = None
+    for u in users:
+        if not isinstance(u, dict) or str(u.get("discord_id")) != str(discord_id):
+            continue
+        key = u.get("user_key")
+        try:
+            end = int(u.get("auth_expire"))
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(key, str) or not key or end <= 0:      # no key, or never expires
+            continue
+        if best is None or end > best[1]:
+            best = (key, end)
+    return best
+
+def luarmor_shift(discord_id: int, seconds: float):
+    """Move this member's whitelist end forward by `seconds` (counting from now if it has already
+    run out). Returns the new end, or None when there is no whitelist to move."""
+    best = luarmor_best(discord_id)
+    if best is None:
+        return None
+    key, end = best
+    new_end = max(end, int(time.time())) + int(seconds)
+    if LUARMOR_DRY_RUN:
+        print(f"[luarmor] (dry run) would move {discord_id}'s whitelist to {new_end}")
+        return new_end
+    luarmor_request("PATCH", body={"user_key": key, "auth_expire": new_end})
+    return new_end
+
+def luarmor_shift_many(user_ids: list, seconds: float):
+    """luarmor_shift for several members, one failure never stopping the rest. Returns (moved, none, failed)."""
+    moved = none = failed = 0
+    for uid in user_ids:
+        try:
+            if luarmor_shift(uid, seconds) is None:
+                none += 1
+            else:
+                moved += 1
+        except Exception as e:
+            failed += 1
+            print(f"[!] Luarmor: could not move {uid}'s whitelist: {e}")
+        time.sleep(LUARMOR_PAUSE)
+    print(f"[luarmor] whitelists moved {moved}, not in Luarmor {none}, failed {failed}")
+    return moved, none, failed
+
+def db_live_windows() -> list:
+    """[(access_id, user_id, end)] for every window that is still switched on."""
+    db = SessionLocal()
+    try:
+        return [(r.id, r.user_id, aware(r.expires_at))
+                for r in db.query(KeyAccess).filter(KeyAccess.active.is_(True)).all()]
+    finally:
+        db.close()
+
+def db_move_window(access_id: int, new_end) -> bool:
+    db = SessionLocal()
+    try:
+        res = db.execute(update(KeyAccess)
+                         .where(KeyAccess.id == access_id, KeyAccess.active.is_(True))
+                         .values(expires_at=new_end))
+        db.commit()
+        return res.rowcount == 1
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+def luarmor_sync_once() -> list:
+    """Make every live window end when its member's whitelist ends. Returns the members changed."""
+    changed = []
+    for access_id, user_id, end in db_live_windows():
+        try:
+            best = luarmor_best(user_id)
+        except Exception as e:
+            print(f"[!] Luarmor lookup failed for {user_id}: {e}")
+            time.sleep(LUARMOR_PAUSE)
+            continue
+        time.sleep(LUARMOR_PAUSE)
+        if best is None:
+            continue
+        new_end = datetime.fromtimestamp(best[1], tz=timezone.utc)
+        if abs((new_end - end).total_seconds()) <= LUARMOR_SLACK:
+            continue
+        print(f"[luarmor] {user_id}: role ended {end.isoformat()}, whitelist ends {new_end.isoformat()}"
+              f" -> role follows the whitelist{' (dry run)' if LUARMOR_DRY_RUN else ''}")
+        if not LUARMOR_DRY_RUN:
+            db_move_window(access_id, new_end)
+        changed.append(user_id)
+    return changed
+
 def db_user_key_info(user_id: int, guild_id: int, show: int = 8) -> dict:
     """What /keyinfo shows about one user: their Tracker Access windows in this server and
     the keys they have redeemed (a key isn't tied to a server). Read only. Returns
@@ -811,6 +968,12 @@ class CredBot(discord.Client):
             self.refresh_stock.start()
         if not self.expire_access.is_running():
             self.expire_access.start()
+        if LUARMOR_ON:
+            if not self.sync_luarmor.is_running():
+                self.sync_luarmor.start()
+            print(f"[*] Luarmor sync on{' (dry run)' if LUARMOR_DRY_RUN else ''}")
+        else:
+            print("[*] Luarmor sync off: set LUARMOR_API_KEY and LUARMOR_PROJECT_ID to turn it on")
         if not self.process_disputes.is_running():
             self.process_disputes.start()
 
@@ -890,6 +1053,18 @@ class CredBot(discord.Client):
 
     @expire_access.before_loop
     async def before_expire(self):
+        await self.wait_until_ready()
+
+    # ── Luarmor: the role follows the whitelist ───────────────────────────
+    @tasks.loop(minutes=5)
+    async def sync_luarmor(self):
+        try:
+            await asyncio.to_thread(luarmor_sync_once)
+        except Exception as e:
+            print(f"[!] Luarmor sync failed: {e}")
+
+    @sync_luarmor.before_loop
+    async def before_sync_luarmor(self):
         await self.wait_until_ready()
 
     async def revoke_access(self, access_id: int, user_id: int, guild_id: int):
@@ -1026,6 +1201,13 @@ async def claim_key(interaction: discord.Interaction, key: str):
             "I couldn't give you the role, but your key has **not** been used. "
             "Please contact staff.", ephemeral=True)
         return
+
+    if LUARMOR_ON:               # a redeemed key adds its time to the whitelist too
+        try:
+            await asyncio.to_thread(luarmor_shift_many, [interaction.user.id],
+                                    KEY_PLANS[info["plan"]].total_seconds())
+        except Exception as e:
+            print(f"[!] Luarmor extend failed for {interaction.user.id}: {e}")
 
     ts = int(info["expires_at"].timestamp())
     print(f"[keys] {interaction.user.id} claimed a {info['plan']} key — "
@@ -1329,6 +1511,11 @@ async def extend_windows(interaction: discord.Interaction, hours: int, user_id: 
     scope = f"user {user_id}" if user_id is not None else "everyone"
     print(f"[keys] {interaction.user.id} extended {scope} by {hours}h: "
           f"{len(rows)} window(s), {len(ends)} user(s)")
+    if LUARMOR_ON and ends:      # the whitelist moves with the role, so the two stay together
+        try:
+            await asyncio.to_thread(luarmor_shift_many, list(ends), hours * 3600)
+        except Exception as e:
+            print(f"[!] Luarmor extend failed: {e}")
     return ends
 
 async def dm_extension(user_id: int, hours: int, end) -> bool:
